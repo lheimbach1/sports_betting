@@ -1,151 +1,317 @@
-"""Tests for the Sporttip provider's parsing logic."""
-
+"""Tests for the Sporttip provider's snapshot parsing logic."""
 
 from src.models.events import Sport
 from src.providers.sporttip import (
+    Snapshot,
     SporttipProvider,
-    _extract_event_list,
-    _is_odds_api_response,
-    _parse_markets,
-    _parse_single_event,
+    _deflate_decode,
+    _get_translated_name,
+    _process_ws_message,
 )
 
 
-class TestIsOddsApiResponse:
-    def test_matches_sport_urls(self) -> None:
-        assert _is_odds_api_response("https://api.example.com/sports/football/events")
-        assert _is_odds_api_response("https://cdn.example.com/feed/matches")
-        assert _is_odds_api_response("https://example.com/v1/odds?sport=1")
+class TestDeflateCode:
+    def test_roundtrip(self) -> None:
+        import zlib
 
-    def test_rejects_unrelated_urls(self) -> None:
-        assert not _is_odds_api_response("https://fonts.googleapis.com/css")
-        assert not _is_odds_api_response("https://www.google-analytics.com/collect")
-        assert not _is_odds_api_response("https://cdn.example.com/styles.css")
+        original = b'{"ping":{}}'
+        compressed = zlib.compress(original)[2:-4]  # raw deflate (strip header/checksum)
+        result = _deflate_decode(compressed)
+        assert result == {"ping": {}}
 
 
-class TestExtractEventList:
-    def test_extracts_from_list(self) -> None:
-        data = [{"id": 1}, {"id": 2}]
-        assert _extract_event_list(data) == data
+class TestGetTranslatedName:
+    def test_returns_english(self) -> None:
+        entity = {"name": "Fussball", "translations": {"en": "Football", "de": "Fussball"}}
+        assert _get_translated_name(entity) == "Football"
 
-    def test_extracts_from_events_key(self) -> None:
-        data = {"events": [{"id": 1}]}
-        assert _extract_event_list(data) == [{"id": 1}]
+    def test_falls_back_to_name(self) -> None:
+        entity = {"name": "Soccer", "translations": {}}
+        assert _get_translated_name(entity) == "Soccer"
 
-    def test_extracts_from_matches_key(self) -> None:
-        data = {"matches": [{"id": 1}]}
-        assert _extract_event_list(data) == [{"id": 1}]
-
-    def test_extracts_nested(self) -> None:
-        data = {"data": {"events": [{"id": 1}]}}
-        assert _extract_event_list(data) == [{"id": 1}]
-
-    def test_returns_empty_for_unknown_structure(self) -> None:
-        assert _extract_event_list({"foo": "bar"}) == []
-        assert _extract_event_list("string") == []
+    def test_empty_entity(self) -> None:
+        assert _get_translated_name({}) == ""
 
 
-class TestParseMarkets:
-    def test_parses_standard_market(self) -> None:
-        raw = {
-            "markets": [
-                {
-                    "name": "1X2",
-                    "outcomes": [
-                        {"name": "Home", "odds": 2.10},
-                        {"name": "Draw", "odds": 3.40},
-                        {"name": "Away", "odds": 3.20},
+class TestSnapshot:
+    def _make_snapshot_with_match(self) -> Snapshot:
+        """Create a snapshot with Real Madrid vs Getafe and a 1X2 market."""
+        snapshot = Snapshot()
+        snapshot.apply_update([
+            {
+                "type": "Competition",
+                "kind": 0,
+                "entity": {
+                    "urn": "asw:competition:1",
+                    "name": "LaLiga",
+                    "translations": {"en": "LaLiga"},
+                },
+            },
+            {
+                "type": "Competitor",
+                "kind": 0,
+                "entity": {
+                    "urn": "asw:competitor:100",
+                    "name": "Real Madrid",
+                    "translations": {"en": "Real Madrid"},
+                },
+            },
+            {
+                "type": "Competitor",
+                "kind": 0,
+                "entity": {
+                    "urn": "asw:competitor:200",
+                    "name": "Getafe CF",
+                    "translations": {"en": "Getafe CF"},
+                },
+            },
+            {
+                "type": "MarketType",
+                "kind": 0,
+                "entity": {
+                    "urn": "asw:markettype:1",
+                    "name": "1x2",
+                    "translations": {"en": "Final Result"},
+                },
+            },
+            {
+                "type": "SelectionType",
+                "kind": 0,
+                "entity": {
+                    "urn": "asw:selectiontype:1",
+                    "name": "1",
+                    "translations": {"en": "1"},
+                },
+            },
+            {
+                "type": "SelectionType",
+                "kind": 0,
+                "entity": {
+                    "urn": "asw:selectiontype:2",
+                    "name": "X",
+                    "translations": {"en": "X"},
+                },
+            },
+            {
+                "type": "SelectionType",
+                "kind": 0,
+                "entity": {
+                    "urn": "asw:selectiontype:3",
+                    "name": "2",
+                    "translations": {"en": "2"},
+                },
+            },
+            {
+                "type": "Selection",
+                "kind": 0,
+                "entity": {
+                    "urn": "sel:1",
+                    "type": "asw:selectiontype:1",
+                    "odds": 1.30,
+                    "state": 1,
+                },
+            },
+            {
+                "type": "Selection",
+                "kind": 0,
+                "entity": {
+                    "urn": "sel:2",
+                    "type": "asw:selectiontype:2",
+                    "odds": 5.20,
+                    "state": 1,
+                },
+            },
+            {
+                "type": "Selection",
+                "kind": 0,
+                "entity": {
+                    "urn": "sel:3",
+                    "type": "asw:selectiontype:3",
+                    "odds": 10.0,
+                    "state": 1,
+                },
+            },
+            {
+                "type": "Market",
+                "kind": 0,
+                "entity": {
+                    "urn": "market:1",
+                    "type": "asw:markettype:1",
+                    "state": 1,
+                    "selections": ["sel:1", "sel:2", "sel:3"],
+                },
+            },
+            {
+                "type": "Event",
+                "kind": 0,
+                "entity": {
+                    "urn": "asw:event:12345",
+                    "name": "Real Madrid : Getafe CF",
+                    "startTime": "2026-03-02T20:00:00Z",
+                    "competition": "asw:competition:1",
+                    "eventCompetitors": [
+                        {"qualifier": "home", "competitor": "asw:competitor:100"},
+                        {"qualifier": "away", "competitor": "asw:competitor:200"},
                     ],
-                }
-            ]
-        }
-        markets = _parse_markets(raw)
-        assert len(markets) == 1
-        assert markets[0].name == "1X2"
-        assert len(markets[0].outcomes) == 3
-        assert markets[0].outcomes[0].odds == 2.10
+                    "markets": ["market:1"],
+                },
+            },
+        ])
+        return snapshot
 
-    def test_parses_alternative_keys(self) -> None:
-        raw = {
-            "odds": [
-                {
-                    "type": "match_result",
-                    "selections": [
-                        {"label": "1", "price": 1.85},
-                        {"label": "X", "price": 3.60},
-                        {"label": "2", "price": 4.00},
-                    ],
-                }
-            ]
-        }
-        markets = _parse_markets(raw)
-        assert len(markets) == 1
-        assert markets[0].name == "match_result"
-        assert markets[0].outcomes[1].odds == 3.60
+    def test_apply_update_populates_entities(self) -> None:
+        snapshot = self._make_snapshot_with_match()
+        assert len(snapshot.events) == 1
+        assert len(snapshot.markets) == 1
+        assert len(snapshot.selections) == 3
+        assert len(snapshot.competitors) == 2
 
-    def test_skips_invalid_outcomes(self) -> None:
-        raw = {
-            "markets": [
-                {
-                    "name": "1X2",
-                    "outcomes": [
-                        {"name": "Home", "odds": "not_a_number"},
-                        {"name": "Away", "odds": 2.50},
-                    ],
-                }
-            ]
-        }
-        markets = _parse_markets(raw)
-        assert len(markets[0].outcomes) == 1
+    def test_build_events_returns_correct_structure(self) -> None:
+        snapshot = self._make_snapshot_with_match()
+        events = snapshot.build_events(Sport.FOOTBALL)
 
-    def test_returns_empty_for_no_markets(self) -> None:
-        assert _parse_markets({}) == []
-
-
-class TestParseSingleEvent:
-    def test_parses_complete_event(self) -> None:
-        raw = {
-            "id": "12345",
-            "homeTeam": {"name": "FC Basel"},
-            "awayTeam": {"name": "FC Zurich"},
-            "startTime": "2025-03-15T18:00:00+01:00",
-            "league": {"name": "Super League"},
-            "markets": [
-                {
-                    "name": "1X2",
-                    "outcomes": [
-                        {"name": "1", "odds": 2.10},
-                        {"name": "X", "odds": 3.40},
-                        {"name": "2", "odds": 3.20},
-                    ],
-                }
-            ],
-        }
-        event = _parse_single_event(raw, Sport.FOOTBALL)
-        assert event is not None
-        assert event.id == "12345"
-        assert event.home_team == "FC Basel"
-        assert event.away_team == "FC Zurich"
-        assert event.league == "Super League"
+        assert len(events) == 1
+        event = events[0]
+        assert event.home_team == "Real Madrid"
+        assert event.away_team == "Getafe CF"
+        assert event.league == "LaLiga"
         assert event.provider == "sporttip"
+        assert event.sport == Sport.FOOTBALL
+
+    def test_build_events_has_odds(self) -> None:
+        snapshot = self._make_snapshot_with_match()
+        events = snapshot.build_events(Sport.FOOTBALL)
+        event = events[0]
+
         assert len(event.markets) == 1
+        market = event.markets[0]
+        assert market.name == "Final Result"
+        assert len(market.outcomes) == 3
+        assert market.outcomes[0].name == "1"
+        assert market.outcomes[0].odds == 1.30
+        assert market.outcomes[1].name == "X"
+        assert market.outcomes[1].odds == 5.20
+        assert market.outcomes[2].name == "2"
+        assert market.outcomes[2].odds == 10.0
 
-    def test_handles_flat_team_names(self) -> None:
-        raw = {
-            "eventId": "99",
-            "home": "Team A",
-            "away": "Team B",
-            "startDate": "2025-04-01T20:00:00Z",
-            "competition": "Cup",
-        }
-        event = _parse_single_event(raw, Sport.FOOTBALL)
-        assert event is not None
-        assert event.home_team == "Team A"
-        assert event.away_team == "Team B"
+    def test_odds_update_detected(self) -> None:
+        snapshot = self._make_snapshot_with_match()
 
-    def test_returns_none_without_id(self) -> None:
-        raw = {"homeTeam": {"name": "A"}, "awayTeam": {"name": "B"}}
-        assert _parse_single_event(raw, Sport.FOOTBALL) is None
+        changed = snapshot.apply_update([
+            {
+                "type": "Selection",
+                "kind": 0,
+                "entity": {
+                    "urn": "sel:1",
+                    "type": "asw:selectiontype:1",
+                    "odds": 1.45,
+                    "state": 1,
+                },
+            },
+        ])
+
+        assert changed == ["sel:1"]
+        assert snapshot.selections["sel:1"]["odds"] == 1.45
+
+    def test_no_change_when_odds_same(self) -> None:
+        snapshot = self._make_snapshot_with_match()
+
+        changed = snapshot.apply_update([
+            {
+                "type": "Selection",
+                "kind": 0,
+                "entity": {
+                    "urn": "sel:1",
+                    "type": "asw:selectiontype:1",
+                    "odds": 1.30,
+                    "state": 1,
+                },
+            },
+        ])
+
+        assert changed == []
+
+    def test_entity_removal(self) -> None:
+        snapshot = self._make_snapshot_with_match()
+        assert "asw:event:12345" in snapshot.events
+
+        snapshot.apply_update([
+            {
+                "type": "Event",
+                "kind": 1,
+                "entity": {"urn": "asw:event:12345"},
+            },
+        ])
+
+        assert "asw:event:12345" not in snapshot.events
+
+    def test_suspended_selection_excluded(self) -> None:
+        snapshot = self._make_snapshot_with_match()
+
+        # Suspend one selection (state != 1)
+        snapshot.apply_update([
+            {
+                "type": "Selection",
+                "kind": 0,
+                "entity": {
+                    "urn": "sel:3",
+                    "type": "asw:selectiontype:3",
+                    "odds": 10.0,
+                    "state": 0,
+                },
+            },
+        ])
+
+        events = snapshot.build_events(Sport.FOOTBALL)
+        market = events[0].markets[0]
+        assert len(market.outcomes) == 2  # only 1 and X remain
+
+
+class TestProcessWsMessage:
+    def test_processes_snapshot_update(self) -> None:
+        import json
+        import zlib
+
+        inner_payload = json.dumps([{
+            "type": "SportsbookSnapshotUpdated",
+            "body": {
+                "snapshotUpdate": {
+                    "snapshotUpdateItems": [
+                        {
+                            "type": "Selection",
+                            "kind": 0,
+                            "entity": {
+                                "urn": "sel:99",
+                                "type": "asw:selectiontype:1",
+                                "odds": 2.5,
+                                "state": 1,
+                            },
+                        }
+                    ]
+                }
+            },
+        }])
+        msg = json.dumps({"payload": inner_payload})
+        # Compress with raw deflate
+        compressed = zlib.compress(msg.encode())[2:-4]
+
+        snapshot = Snapshot()
+        result = _process_ws_message(compressed, snapshot)
+
+        assert result is None  # no prior selection, so no "change" detected
+        assert "sel:99" in snapshot.selections
+        assert snapshot.selections["sel:99"]["odds"] == 2.5
+
+    def test_ignores_non_snapshot_messages(self) -> None:
+        import json
+        import zlib
+
+        msg = json.dumps({"pong": {}})
+        compressed = zlib.compress(msg.encode())[2:-4]
+
+        snapshot = Snapshot()
+        result = _process_ws_message(compressed, snapshot)
+        assert result is None
 
 
 class TestSporttipProvider:
