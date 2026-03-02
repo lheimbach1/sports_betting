@@ -13,6 +13,9 @@ dependencies = [
     "playwright>=1.40",
 ]
 
+[project.scripts]
+sporttip-explore = "src.cli.explore:cli"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

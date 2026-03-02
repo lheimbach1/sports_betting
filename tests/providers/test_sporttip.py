@@ -2,11 +2,15 @@
 
 from src.models.events import Sport
 from src.providers.sporttip import (
+    DEFAULT_LEAGUES,
+    LEAGUE_URLS,
     Snapshot,
     SporttipProvider,
     _deflate_decode,
     _get_translated_name,
     _process_ws_message,
+    _resolve_league_url,
+    _slugify_league,
 )
 
 
@@ -312,6 +316,34 @@ class TestProcessWsMessage:
         snapshot = Snapshot()
         result = _process_ws_message(compressed, snapshot)
         assert result is None
+
+
+class TestLeagueUrlResolution:
+    def test_known_league_returns_url(self) -> None:
+        assert _resolve_league_url("Bundesliga", Sport.FOOTBALL) == "/football/germany/bundesliga"
+        result = _resolve_league_url("Premier League", Sport.FOOTBALL)
+        assert result == "/football/england/premier-league"
+
+    def test_unknown_league_uses_slugified_fallback(self) -> None:
+        url = _resolve_league_url("Eredivisie", Sport.FOOTBALL)
+        assert url == "/football/eredivisie"
+
+    def test_slugify_simple(self) -> None:
+        assert _slugify_league("Premier League") == "premier-league"
+
+    def test_slugify_dots_removed(self) -> None:
+        assert _slugify_league("2. Bundesliga") == "2-bundesliga"
+
+    def test_slugify_special_chars(self) -> None:
+        assert _slugify_league("Süper Lig") == "s-per-lig"
+
+    def test_default_leagues_are_known(self) -> None:
+        for league in DEFAULT_LEAGUES:
+            assert league in LEAGUE_URLS
+
+    def test_all_known_leagues_start_with_sport(self) -> None:
+        for url in LEAGUE_URLS.values():
+            assert url.startswith("/football/")
 
 
 class TestSporttipProvider:
