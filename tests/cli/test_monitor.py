@@ -160,26 +160,52 @@ class TestEscapeApplescript:
 
 
 class TestSendNotification:
+    @patch("src.cli.monitor.sys")
     @patch("src.cli.monitor.subprocess.Popen")
-    def test_calls_osascript(self, mock_popen: object) -> None:
+    def test_macos_calls_osascript_and_afplay(
+        self, mock_popen: object, mock_sys: object,
+    ) -> None:
+        mock_sys.platform = "darwin"  # type: ignore[union-attr]
+        send_notification("Title", "Message")
+        calls = mock_popen.call_args_list  # type: ignore[union-attr]
+        assert len(calls) == 2
+        # First call: display alert
+        cmd_alert = calls[0][0][0]
+        assert cmd_alert[0] == "osascript"
+        assert "display alert" in cmd_alert[2]
+        assert "Title" in cmd_alert[2]
+        assert "Message" in cmd_alert[2]
+        # Second call: afplay sound
+        cmd_sound = calls[1][0][0]
+        assert cmd_sound[0] == "afplay"
+
+    @patch("src.cli.monitor.sys")
+    @patch("src.cli.monitor.subprocess.Popen")
+    def test_macos_escapes_special_chars(
+        self, mock_popen: object, mock_sys: object,
+    ) -> None:
+        mock_sys.platform = "darwin"  # type: ignore[union-attr]
+        send_notification('Ti"tle', 'Msg "with" quotes')
+        calls = mock_popen.call_args_list  # type: ignore[union-attr]
+        script = calls[0][0][0][2]
+        assert '\\"' in script
+        assert 'Ti"tle' not in script
+
+    @patch("src.cli.monitor.sys")
+    @patch("src.cli.monitor.subprocess.Popen")
+    def test_windows_calls_powershell(
+        self, mock_popen: object, mock_sys: object,
+    ) -> None:
+        mock_sys.platform = "win32"  # type: ignore[union-attr]
         send_notification("Title", "Message")
         assert mock_popen.called  # type: ignore[union-attr]
-        args = mock_popen.call_args  # type: ignore[union-attr]
-        cmd = args[0][0]  # positional arg: the command list
-        assert cmd[0] == "osascript"
-        assert cmd[1] == "-e"
-        assert "Title" in cmd[2]
-        assert "Message" in cmd[2]
-        assert "display alert" in cmd[2]
-
-    @patch("src.cli.monitor.subprocess.Popen")
-    def test_escapes_special_chars_in_args(self, mock_popen: object) -> None:
-        send_notification('Ti"tle', 'Msg "with" quotes')
-        args = mock_popen.call_args  # type: ignore[union-attr]
-        script = args[0][0][2]
-        assert '\\"' in script
-        # Original unescaped quotes should not appear
-        assert 'Ti"tle' not in script
+        cmd = mock_popen.call_args[0][0]  # type: ignore[union-attr]
+        assert cmd[0] == "powershell"
+        # Command string should contain both title and message
+        ps_cmd = cmd[-1]
+        assert "Title" in ps_cmd
+        assert "Message" in ps_cmd
+        assert "MessageBox" in ps_cmd
 
 
 # ---------------------------------------------------------------------------

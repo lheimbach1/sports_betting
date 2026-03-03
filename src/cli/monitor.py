@@ -118,7 +118,7 @@ class Alert:
 
 
 # ---------------------------------------------------------------------------
-# macOS notification
+# Cross-platform notification
 # ---------------------------------------------------------------------------
 
 
@@ -128,10 +128,20 @@ def _escape_applescript(text: str) -> str:
 
 
 def send_notification(title: str, message: str) -> None:
-    """Send a persistent macOS alert via osascript.
+    """Send a persistent, audible notification (macOS + Windows).
 
-    Uses ``display alert`` which stays on screen until the user clicks OK.
+    macOS: ``display alert`` (stays until clicked) + system sound via ``afplay``.
+    Windows: PowerShell ``MessageBox`` (stays until clicked) + system beep.
     """
+    if sys.platform == "darwin":
+        _notify_macos(title, message)
+    elif sys.platform == "win32":
+        _notify_windows(title, message)
+    else:
+        logger.debug("Unsupported platform for notifications: %s", sys.platform)
+
+
+def _notify_macos(title: str, message: str) -> None:
     safe_title = _escape_applescript(title)
     safe_msg = _escape_applescript(message)
     script = f'display alert "{safe_title}" message "{safe_msg}"'
@@ -142,7 +152,36 @@ def send_notification(title: str, message: str) -> None:
             stderr=subprocess.DEVNULL,
         )
     except FileNotFoundError:
-        logger.debug("osascript not found — skipping notification")
+        logger.debug("osascript not found")
+    # Play system alert sound
+    try:
+        subprocess.Popen(  # noqa: S603
+            ["afplay", "/System/Library/Sounds/Glass.aiff"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        logger.debug("afplay not found")
+
+
+def _notify_windows(title: str, message: str) -> None:
+    safe_title = title.replace("'", "''")
+    safe_msg = message.replace("'", "''")
+    ps_script = (
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "Add-Type -AssemblyName PresentationCore;"
+        "[System.Media.SystemSounds]::Exclamation.Play();"
+        f"[System.Windows.Forms.MessageBox]::Show('{safe_msg}','{safe_title}',"
+        "'OK','Exclamation')"
+    )
+    try:
+        subprocess.Popen(  # noqa: S603
+            ["powershell", "-WindowStyle", "Hidden", "-Command", ps_script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        logger.debug("powershell not found")
 
 
 # ---------------------------------------------------------------------------
