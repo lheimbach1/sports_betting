@@ -1,4 +1,4 @@
-![CI](https://github.com/lheimbach1/sports_betting/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/lheimbach1/sports_betting/actions/workflows/ci.yml/badge.svg?branch=feat/project-setup-and-sporttip-scraper)
 
 # Sports Betting Arbitrage Finder
 
@@ -8,7 +8,7 @@ Detect arbitrage opportunities and mispriced bets across sports betting provider
 
 | Provider | Status | Notes |
 |----------|--------|-------|
-| [Sporttip](https://www.sporttip.ch) (Swisslos) | In Progress | Swiss state-regulated provider |
+| [Sporttip](https://www.swisslos.ch/de/sporttip) (Swisslos) | In Progress | Swiss state-regulated provider |
 
 ## Features
 
