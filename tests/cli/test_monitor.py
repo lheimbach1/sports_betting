@@ -267,13 +267,35 @@ class TestRenderSummary:
 
     def test_shows_match_time(self) -> None:
         alerts = self._make_alerts()
-        times = {"e1": "2H 67'"}
+        times = {"e1": "2H ~67'"}
         out = render_summary(alerts, 1, match_times=times)
-        assert "2H 67'" in out
+        assert "2H ~67'" in out
 
-    def test_shows_clock_column_header(self) -> None:
-        out = render_summary(self._make_alerts(), 0)
-        assert "Clock" in out
+    def test_shows_market_odds(self) -> None:
+        alerts = self._make_alerts()
+        mkt = {
+            "Final Result:Real Madrid": [
+                ("Real Madrid", 1.85), ("Draw", 3.40), ("Getafe", 4.20),
+            ],
+        }
+        out = render_summary(alerts, 1, market_odds=mkt)
+        assert "3.40" in out
+        assert "4.20" in out
+        assert "Getafe" in out
+
+    def test_shows_all_outcomes_for_each_alert(self) -> None:
+        alerts = self._make_alerts()
+        mkt = {
+            "Final Result:Real Madrid": [
+                ("Real Madrid", 1.85), ("Draw", 3.40), ("Getafe", 4.20),
+            ],
+            "Final Result:Draw": [
+                ("Real Madrid", 1.85), ("Draw", 3.40), ("Getafe", 4.20),
+            ],
+        }
+        out = render_summary(alerts, 1, market_odds=mkt)
+        # Both alerts should show the full market line
+        assert out.count("Getafe") >= 2
 
 
 # ---------------------------------------------------------------------------

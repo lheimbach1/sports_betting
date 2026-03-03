@@ -214,85 +214,86 @@ def _match_time(raw_event: dict[str, Any]) -> str:
 
     elapsed_min = (datetime.now(tz=tz.utc) - start).total_seconds() / 60
 
-    # Rough football minute estimate
+    # Approximate football minute (startTime is scheduled, not actual kickoff;
+    # halftime ~15-18 min, injury time adds a few min per half)
     if label == "1H":
-        minute = min(int(elapsed_min), 45)
+        minute = min(int(elapsed_min), 50)
     elif label == "2H":
-        minute = 45 + min(int(elapsed_min - 60), 45)  # ~15 min halftime
+        minute = 45 + max(int(elapsed_min - 63), 0)  # 1H ~48 + HT ~15
     elif label == "ET1":
-        minute = 90 + min(int(elapsed_min - 120), 15)
+        minute = 90 + max(int(elapsed_min - 125), 0)
     elif label == "ET2":
-        minute = 105 + min(int(elapsed_min - 135), 15)
+        minute = 105 + max(int(elapsed_min - 143), 0)
     else:
         minute = int(elapsed_min)
 
-    return f"{label} {max(minute, 1)}'"
+    return f"{label} ~{max(minute, 1)}'"
 
 
 def render_summary(
     alerts: list[Alert],
     update_count: int,
     match_times: dict[str, str] | None = None,
+    market_odds: dict[str, list[tuple[str, float]]] | None = None,
 ) -> str:
-    """Render the live alert summary table."""
+    """Render the live alert summary table.
+
+    Args:
+        market_odds: Per-alert full market odds keyed by ``alert.odds_key``.
+            Each value is a list of ``(outcome_name, odds)`` for the full market.
+    """
     import shutil
 
     term_w = shutil.get_terminal_size((100, 24)).columns
     now = datetime.now().strftime("%H:%M:%S")
     times = match_times or {}
+    mkt = market_odds or {}
 
     lines: list[str] = [
         f" Odds Monitor  |  updates: {update_count}  |  {now}",
         "",
     ]
 
-    # Adaptive column widths based on terminal width
-    # Minimum: #(3) + Event(20) + Clock(7) + Odds(5) + Dir(2) + Thr(5) + Status(9) = ~60
-    # With market/outcome we need more
-    ev_w = min(max(term_w - 70, 20), 36)
-    mk_w = min(max(term_w - 90, 12), 20)
-    oc_w = min(max(term_w - 100, 10), 16)
-
-    hdr = (
-        f" {'#':>2}"
-        f"  {'Event':<{ev_w}}"
-        f"  {'Clock':<7}"
-        f"  {'Market':<{mk_w}}"
-        f"  {'Outcome':<{oc_w}}"
-        f"  {'Odds':>5}"
-        f" {'':>2}"
-        f" {'Thr':>5}"
-        f"  {'Status':<9}"
-    )
-    lines.append(hdr)
-    lines.append(" " + "-" * (len(hdr) - 1))
-
     for i, a in enumerate(alerts, 1):
-        ev = (a.event_label[:ev_w - 2] + "..") if len(a.event_label) > ev_w else a.event_label
-        mt = times.get(a.event_id, "")[:7]
-        mk = (a.market_name[:mk_w - 2] + "..") if len(a.market_name) > mk_w else a.market_name
-        oc = (a.outcome_name[:oc_w - 2] + "..") if len(a.outcome_name) > oc_w else a.outcome_name
-        odds_str = f"{a.current_odds:.2f}" if a.current_odds else "  -  "
-
+        # --- Main alert line ---
         status = a.status.value
         if a.status == AlertStatus.TRIGGERED:
-            status = f"\033[1;31m{status}\033[0m"  # bold red
+            status = f"\033[1;31m{status}\033[0m"
         elif a.status == AlertStatus.COOLDOWN:
-            status = f"\033[33m{status}\033[0m"  # yellow
+            status = f"\033[33m{status}\033[0m"
+
+        mt = times.get(a.event_id, "")
+        odds_str = f"{a.current_odds:.2f}" if a.current_odds else " - "
+
+        ev = a.event_label
+        if len(ev) > 34:
+            ev = ev[:32] + ".."
 
         lines.append(
-            f" {i:>2}"
-            f"  {ev:<{ev_w}}"
-            f"  {mt:<7}"
-            f"  {mk:<{mk_w}}"
-            f"  {oc:<{oc_w}}"
-            f"  {odds_str:>5}"
-            f" {a.direction.value:>2}"
-            f" {a.threshold:>5.2f}"
-            f"  {status}"
+            f" {i})  {ev}  [{mt}]"
+        )
+        lines.append(
+            f"     {a.market_name}: \033[1m{a.outcome_name} {odds_str}\033[0m"
+            f"  {a.direction.value} {a.threshold:.2f}  {status}"
         )
 
-    lines.append("")
+        # --- Full market odds sub-row ---
+        outcomes = mkt.get(a.odds_key)
+        if outcomes:
+            parts: list[str] = []
+            for name, odds in outcomes:
+                if name == a.outcome_name:
+                    parts.append(f"\033[1m{name}: {odds:.2f}\033[0m")
+                else:
+                    parts.append(f"{name}: {odds:.2f}")
+            # Truncate if too wide
+            market_line = "     " + " | ".join(parts)
+            if len(market_line) > term_w:
+                market_line = market_line[: term_w - 2] + ".."
+            lines.append(market_line)
+
+        lines.append("")
+
     lines.append(" Ctrl+C to stop")
     return "\n".join(lines)
 
@@ -692,10 +693,21 @@ async def run_monitor(
             for urn, raw in snapshot.events.items():
                 match_times[urn] = _match_time(raw)
 
+            # Build full market odds for each alert
+            market_odds: dict[str, list[tuple[str, float]]] = {}
+
             for alert in alerts:
                 event = events_by_id.get(alert.event_id)
                 if event is None:
                     continue
+
+                # Find the matching market and collect all outcomes
+                for market in event.markets:
+                    if market.name == alert.market_name:
+                        market_odds[alert.odds_key] = [
+                            (o.name, o.odds) for o in market.outcomes
+                        ]
+                        break
 
                 odds_dict = _snapshot_odds(event)
                 current = odds_dict.get(alert.odds_key)
@@ -717,7 +729,7 @@ async def run_monitor(
                     # Update current_odds even when not firing
                     alert.current_odds = current
 
-            _redraw(render_summary(alerts, update_count, match_times))
+            _redraw(render_summary(alerts, update_count, match_times, market_odds))
     except KeyboardInterrupt:
         print("\nStopped.")
 
