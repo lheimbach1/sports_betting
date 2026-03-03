@@ -16,6 +16,7 @@ Detect arbitrage opportunities and mispriced bets across sports betting provider
 - Detect arbitrage opportunities (guaranteed-profit bets across providers)
 - Identify mispriced lines compared to market consensus
 - Provider-agnostic architecture — easy to add new bookmakers
+- **Live odds monitor** with configurable threshold alerts and cross-platform notifications
 
 ## Setup
 
@@ -38,6 +39,37 @@ python -m src.providers.sporttip
 python -m src.arbitrage.scanner
 ```
 
+### Odds Monitor
+
+The odds monitor is a standalone CLI tool that streams live odds from Sporttip and notifies you when odds cross a user-defined threshold.
+
+```bash
+# Launch the interactive monitor
+python -m src.cli.monitor
+
+# Or use the installed console script
+sporttip-monitor
+```
+
+**Setup flow:**
+
+1. Pick a sport (or choose **Live** to browse in-play events)
+2. Select a category / sub-category
+3. Choose an event, market, and outcome
+4. Set a direction (`>=` or `<=`) and threshold odds value
+5. Optionally add more alerts — all alerts share one WebSocket stream
+6. The monitor begins streaming and redraws a live summary table in-place
+
+**Features:**
+
+- Threshold alerts with `>=` (odds rise) or `<=` (odds drop) direction
+- Cooldown state machine (WATCHING → TRIGGERED → COOLDOWN → WATCHING) prevents duplicate alerts
+- Cross-platform persistent notifications — macOS (`display alert` + Glass sound) and Windows (PowerShell `MessageBox` + system sound)
+- Approximate live match clock (e.g. `1H ~23'`, `2H ~67'`, `HT`, `FT`)
+- Full market odds display showing all outcomes alongside the monitored one
+- In-place terminal rendering with ANSI colors (no flicker)
+- Text filtering at every selection step for quick navigation
+
 ## Development
 
 ```bash
@@ -55,11 +87,15 @@ mypy src/
 
 ```
 src/
+├── cli/             # CLI tools
+│   ├── explore.py   # Interactive odds explorer
+│   └── monitor.py   # Live odds monitor with threshold alerts
 ├── models/          # Shared data models (events, odds, etc.)
 ├── providers/       # Betting provider scrapers/API clients
 │   └── sporttip.py  # Sporttip (Swisslos) client
 └── arbitrage/       # Arbitrage detection logic
 tests/
+├── cli/             # CLI tool tests
 ├── providers/       # Provider-specific tests
 └── arbitrage/       # Arbitrage logic tests
 ```

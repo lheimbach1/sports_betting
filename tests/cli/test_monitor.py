@@ -13,6 +13,7 @@ from src.cli.monitor import (
     Direction,
     _escape_applescript,
     _match_time,
+    _split_name_count,
     render_summary,
     send_notification,
 )
@@ -335,3 +336,308 @@ class TestMatchTime:
         result = _match_time(raw)
         assert result.startswith("1H")
         assert "'" in result
+
+    def test_second_half_shows_minute(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        # Started 75 minutes ago -> should be around 2H ~57'
+        start = datetime.now(tz=timezone.utc) - timedelta(minutes=75)
+        raw = {
+            "phase": "asw:phase:7",
+            "startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        result = _match_time(raw)
+        assert result.startswith("2H")
+        assert "~" in result
+        # Should be ≥ 45 and reasonable
+        minute = int(result.split("~")[1].rstrip("'"))
+        assert 50 <= minute <= 65
+
+    def test_extra_time_first_half(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        start = datetime.now(tz=timezone.utc) - timedelta(minutes=130)
+        raw = {
+            "phase": "asw:phase:9",
+            "startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        result = _match_time(raw)
+        assert result.startswith("ET1")
+        assert "~" in result
+        minute = int(result.split("~")[1].rstrip("'"))
+        assert minute >= 90
+
+    def test_extra_time_second_half(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        start = datetime.now(tz=timezone.utc) - timedelta(minutes=148)
+        raw = {
+            "phase": "asw:phase:10",
+            "startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        result = _match_time(raw)
+        assert result.startswith("ET2")
+        assert "~" in result
+        minute = int(result.split("~")[1].rstrip("'"))
+        assert minute >= 105
+
+    def test_invalid_start_time_returns_label_only(self) -> None:
+        raw = {"phase": "asw:phase:6", "startTime": "not-a-date"}
+        assert _match_time(raw) == "1H"
+
+    def test_missing_start_time_returns_label_only(self) -> None:
+        raw = {"phase": "asw:phase:7"}
+        assert _match_time(raw) == "2H"
+
+    def test_iso_format_without_z_suffix(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        start = datetime.now(tz=timezone.utc) - timedelta(minutes=10)
+        raw = {
+            "phase": "asw:phase:6",
+            "startTime": start.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+        }
+        result = _match_time(raw)
+        assert result.startswith("1H")
+        assert "~" in result
+
+    def test_penalty_phase_label(self) -> None:
+        assert _match_time({"phase": "asw:phase:11"}) == "Pen"
+
+    def test_first_half_capped_at_50(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        # Started 55 minutes ago — should cap at 50
+        start = datetime.now(tz=timezone.utc) - timedelta(minutes=55)
+        raw = {
+            "phase": "asw:phase:6",
+            "startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        result = _match_time(raw)
+        minute = int(result.split("~")[1].rstrip("'"))
+        assert minute <= 50
+
+
+# ---------------------------------------------------------------------------
+# Alert — additional edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestAlertEdgeCases:
+    def test_check_does_not_trigger_when_in_cooldown(self) -> None:
+        a = Alert(
+            event_id="e1", event_label="A vs B", market_name="M",
+            outcome_name="A", odds_key="M:A", direction=Direction.GTE,
+            threshold=2.00, status=AlertStatus.COOLDOWN,
+        )
+        assert a.check(5.00) is False
+
+    def test_check_always_updates_current_odds_even_when_not_triggered(self) -> None:
+        a = Alert(
+            event_id="e1", event_label="A vs B", market_name="M",
+            outcome_name="A", odds_key="M:A", direction=Direction.GTE,
+            threshold=2.00, status=AlertStatus.TRIGGERED,
+        )
+        a.check(3.50)
+        assert a.current_odds == 3.50
+
+    def test_odds_crossed_back_lte(self) -> None:
+        """LTE alert resets when odds rise back above threshold."""
+        a = Alert(
+            event_id="e1", event_label="A vs B", market_name="M",
+            outcome_name="A", odds_key="M:A", direction=Direction.LTE,
+            threshold=3.00, cooldown_seconds=999.0,
+        )
+        a.check(2.50)
+        a.fire()
+        # Odds rise back above threshold
+        a.current_odds = 3.50
+        a.maybe_exit_cooldown()
+        assert a.status == AlertStatus.WATCHING
+
+    def test_odds_not_crossed_back_stays_in_cooldown(self) -> None:
+        """GTE alert stays in cooldown when odds remain above threshold."""
+        a = Alert(
+            event_id="e1", event_label="A vs B", market_name="M",
+            outcome_name="A", odds_key="M:A", direction=Direction.GTE,
+            threshold=2.00, cooldown_seconds=999.0,
+        )
+        a.check(2.50)
+        a.fire()
+        a.maybe_exit_cooldown()
+        assert a.status == AlertStatus.COOLDOWN
+
+    def test_default_values(self) -> None:
+        a = Alert(
+            event_id="e1", event_label="A vs B", market_name="M",
+            outcome_name="A", odds_key="M:A", direction=Direction.GTE,
+            threshold=2.00,
+        )
+        assert a.status == AlertStatus.WATCHING
+        assert a.current_odds == 0.0
+        assert a.cooldown_seconds == 60.0
+        assert a.last_triggered == 0.0
+
+    def test_fire_records_monotonic_time(self) -> None:
+        a = Alert(
+            event_id="e1", event_label="A vs B", market_name="M",
+            outcome_name="A", odds_key="M:A", direction=Direction.GTE,
+            threshold=2.00,
+        )
+        before = time.monotonic()
+        a.fire()
+        after = time.monotonic()
+        assert before <= a.last_triggered <= after
+
+
+# ---------------------------------------------------------------------------
+# Direction / AlertStatus enum values
+# ---------------------------------------------------------------------------
+
+
+class TestEnums:
+    def test_direction_gte_value(self) -> None:
+        assert Direction.GTE.value == ">="
+        assert str(Direction.GTE) == "Direction.GTE"
+
+    def test_direction_lte_value(self) -> None:
+        assert Direction.LTE.value == "<="
+
+    def test_alert_status_values(self) -> None:
+        assert AlertStatus.WATCHING.value == "watching"
+        assert AlertStatus.TRIGGERED.value == "TRIGGERED"
+        assert AlertStatus.COOLDOWN.value == "cooldown"
+
+
+# ---------------------------------------------------------------------------
+# send_notification — additional cases
+# ---------------------------------------------------------------------------
+
+
+class TestSendNotificationEdgeCases:
+    @patch("src.cli.monitor.sys")
+    @patch("src.cli.monitor.subprocess.Popen")
+    def test_unsupported_platform_does_nothing(
+        self, mock_popen: object, mock_sys: object,
+    ) -> None:
+        mock_sys.platform = "linux"  # type: ignore[union-attr]
+        send_notification("Title", "Message")
+        assert not mock_popen.called  # type: ignore[union-attr]
+
+    @patch("src.cli.monitor.sys")
+    @patch("src.cli.monitor.subprocess.Popen", side_effect=FileNotFoundError)
+    def test_macos_file_not_found_does_not_raise(
+        self, mock_popen: object, mock_sys: object,
+    ) -> None:
+        mock_sys.platform = "darwin"  # type: ignore[union-attr]
+        # Should not raise
+        send_notification("Title", "Message")
+
+    @patch("src.cli.monitor.sys")
+    @patch("src.cli.monitor.subprocess.Popen", side_effect=FileNotFoundError)
+    def test_windows_file_not_found_does_not_raise(
+        self, mock_popen: object, mock_sys: object,
+    ) -> None:
+        mock_sys.platform = "win32"  # type: ignore[union-attr]
+        send_notification("Title", "Message")
+
+    @patch("src.cli.monitor.sys")
+    @patch("src.cli.monitor.subprocess.Popen")
+    def test_windows_escapes_single_quotes(
+        self, mock_popen: object, mock_sys: object,
+    ) -> None:
+        mock_sys.platform = "win32"  # type: ignore[union-attr]
+        send_notification("It's", "O'Brien's bet")
+        cmd = mock_popen.call_args[0][0]  # type: ignore[union-attr]
+        ps_cmd = cmd[-1]
+        assert "It''s" in ps_cmd
+        assert "O''Brien''s bet" in ps_cmd
+
+
+# ---------------------------------------------------------------------------
+# render_summary — additional edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestRenderSummaryEdgeCases:
+    def test_empty_alerts(self) -> None:
+        out = render_summary([], 0)
+        assert "Odds Monitor" in out
+        assert "Ctrl+C" in out
+
+    def test_long_event_name_truncated(self) -> None:
+        a = Alert(
+            event_id="e1",
+            event_label="A Very Long Team Name United vs Another Very Long Team Name City",
+            market_name="M", outcome_name="Home",
+            odds_key="M:Home", direction=Direction.GTE,
+            threshold=2.00, current_odds=1.50,
+        )
+        out = render_summary([a], 0)
+        assert ".." in out
+
+    def test_zero_current_odds_shows_dash(self) -> None:
+        a = Alert(
+            event_id="e1", event_label="A vs B", market_name="M",
+            outcome_name="A", odds_key="M:A", direction=Direction.GTE,
+            threshold=2.00, current_odds=0.0,
+        )
+        out = render_summary([a], 0)
+        assert " - " in out
+
+    def test_cooldown_status_in_output(self) -> None:
+        a = Alert(
+            event_id="e1", event_label="A vs B", market_name="M",
+            outcome_name="A", odds_key="M:A", direction=Direction.GTE,
+            threshold=2.00, current_odds=2.10, status=AlertStatus.COOLDOWN,
+        )
+        out = render_summary([a], 0)
+        assert "cooldown" in out
+
+    def test_no_match_time_shows_empty_brackets(self) -> None:
+        a = Alert(
+            event_id="e1", event_label="A vs B", market_name="M",
+            outcome_name="A", odds_key="M:A", direction=Direction.GTE,
+            threshold=2.00, current_odds=1.50,
+        )
+        out = render_summary([a], 0)
+        assert "[]" in out
+
+    def test_market_odds_not_provided(self) -> None:
+        a = Alert(
+            event_id="e1", event_label="A vs B", market_name="M",
+            outcome_name="A", odds_key="M:A", direction=Direction.GTE,
+            threshold=2.00, current_odds=1.50,
+        )
+        # No market_odds passed — should not crash
+        out = render_summary([a], 0, market_odds=None)
+        assert "A vs B" in out
+
+    def test_header_contains_current_time(self) -> None:
+        from datetime import datetime
+
+        out = render_summary([], 0)
+        now_prefix = datetime.now().strftime("%H:%M")
+        assert now_prefix in out
+
+
+# ---------------------------------------------------------------------------
+# _split_name_count
+# ---------------------------------------------------------------------------
+
+
+class TestSplitNameCount:
+    def test_name_with_count(self) -> None:
+        assert _split_name_count("Football\n3") == ("Football", "3")
+
+    def test_name_without_count(self) -> None:
+        assert _split_name_count("Tennis") == ("Tennis", "")
+
+    def test_multiline_name_with_count(self) -> None:
+        assert _split_name_count("Ice\nHockey\n5") == ("Ice Hockey", "5")
+
+    def test_empty_string(self) -> None:
+        assert _split_name_count("") == ("", "")
+
+    def test_whitespace_only(self) -> None:
+        assert _split_name_count("   \n  ") == ("", "")
