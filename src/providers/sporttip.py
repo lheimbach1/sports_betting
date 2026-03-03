@@ -68,6 +68,7 @@ SPORT_FROM_SLUG: dict[str, Sport] = {
 }
 
 SITE_BASE = "https://www.swisslos.ch/en/sporttip/sports"
+LIVE_BASE = "https://www.swisslos.ch/en/sporttip/live"
 
 # Known league URL paths (sport/country/league segments)
 LEAGUE_URLS: dict[str, str] = {
@@ -393,7 +394,7 @@ async def _connect_and_collect(snapshot: Snapshot, url_part: str) -> None:
 
         page.on("websocket", on_ws)
 
-        site_url = f"{SITE_BASE}{url_part}"
+        site_url = url_part if url_part.startswith("http") else f"{SITE_BASE}{url_part}"
         logger.info("Connecting to %s", site_url)
         await page.goto(site_url, wait_until="domcontentloaded", timeout=45_000)
 
@@ -584,7 +585,7 @@ async def _connect_and_stream(
 
         page.on("websocket", on_ws)
 
-        site_url = f"{SITE_BASE}{url_part}"
+        site_url = url_part if url_part.startswith("http") else f"{SITE_BASE}{url_part}"
         logger.info("Streaming from %s", site_url)
         await page.goto(site_url, wait_until="domcontentloaded", timeout=45_000)
 
