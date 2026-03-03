@@ -10,10 +10,16 @@ reach during live play for an arbitrage opportunity. The strategy:
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 
 from src.models.events import Event
+
+logger = logging.getLogger(__name__)
+
+# Known aliases for the 1X2 / Final Result market
+_1X2_MARKET_NAMES = {"final result", "1x2", "3-weg", "3-way (regular playing time)"}
 
 # Sporttip odds move in 0.05 increments
 TICK_SIZE = 0.05
@@ -37,7 +43,7 @@ def _find_1x2_odds(event: Event) -> tuple[float, float, float] | None:
     Returns (home, draw, away) odds or None if not found.
     """
     for market in event.markets:
-        if market.name != "Final Result":
+        if market.name.lower() not in _1X2_MARKET_NAMES:
             continue
         odds: dict[str, float] = {}
         for outcome in market.outcomes:
@@ -68,6 +74,7 @@ class ArbOpportunity:
     home_odds: float
     target_fav_odds: float  # breakeven favorite odds
     example_fav_odds: float  # target with desired margin
+    overround: float = 0.0  # sum of implied probabilities − 1 (e.g. 0.05 = 5% over)
     stakes: dict[str, float] = field(default_factory=dict)  # % of budget
 
 
@@ -108,26 +115,32 @@ def calculate_margin(o1: float, ox: float, o2: float) -> float:
 
 def find_underdog_arbs(
     events: list[Event],
-    min_fav_odds: float = 1.20,
-    max_fav_odds: float = 1.80,
+    min_fav_odds: float = 0.0,
+    max_fav_odds: float = float("inf"),
     target_margin: float = 0.05,
 ) -> list[ArbOpportunity]:
-    """Scan events for mild favorites and calculate arbitrage targets.
+    """Scan events for arbitrage targets based on 1X2 odds.
 
     Args:
         events: List of events with 1X2 markets.
-        min_fav_odds: Minimum favorite odds to consider (too low = unrealistic target).
-        max_fav_odds: Maximum favorite odds to consider (above this = not a clear favorite).
+        min_fav_odds: Minimum favorite odds to consider (0 = no lower bound).
+        max_fav_odds: Maximum favorite odds to consider (inf = no upper bound).
         target_margin: Desired profit margin (0.05 = 5%).
 
     Returns:
-        List of ArbOpportunity sorted by target_fav_odds (easiest first).
+        List of ArbOpportunity sorted by overround (ascending).
     """
     opportunities: list[ArbOpportunity] = []
 
     for event in events:
         odds = _find_1x2_odds(event)
         if odds is None:
+            logger.debug(
+                "No 1X2 market found for %s vs %s (markets: %s)",
+                event.home_team,
+                event.away_team,
+                [m.name for m in event.markets],
+            )
             continue
 
         o1, ox, o2 = odds
@@ -135,14 +148,15 @@ def find_underdog_arbs(
         # Find the favorite (lowest odds)
         min_odds = min(o1, ox, o2)
         if min_odds == ox:
-            # Draw is favorite — unusual, skip
-            continue
-        if min_odds == o2:
+            # Draw is favorite — bet on home + away pre-match,
+            # need draw to spike in-play
+            favorite = "X"
+            fav_odds = ox
+            target = calculate_target_odds(o1, o2)
+        elif min_odds == o2:
             # Away favorite — the "underdog" outcomes are 1 (home) and X (draw)
             favorite = "2"
             fav_odds = o2
-            # For target calculation: we bet on home + draw pre-match,
-            # need away (favorite) to spike in-play
             target = calculate_target_odds(ox, o1)
         else:
             # Home favorite (most common)
@@ -162,8 +176,14 @@ def find_underdog_arbs(
         # Calculate stakes at the example odds
         if favorite == "1":
             stakes = calculate_stakes(example_odds, ox, o2)
-        else:
+        elif favorite == "2":
             stakes = calculate_stakes(example_odds, ox, o1)
+        else:
+            # favorite == "X"
+            stakes = calculate_stakes(o1, example_odds, o2)
+
+        # Overround: how far the implied probabilities exceed 100%
+        overround = (1 / o1 + 1 / ox + 1 / o2) - 1
 
         opportunities.append(
             ArbOpportunity(
@@ -178,10 +198,11 @@ def find_underdog_arbs(
                 home_odds=o1,
                 target_fav_odds=target_snapped,
                 example_fav_odds=example_odds,
+                overround=overround,
                 stakes=stakes,
             )
         )
 
-    # Sort by target odds (lowest = most likely to hit)
-    opportunities.sort(key=lambda o: o.target_fav_odds)
+    # Sort by overround (ascending — closest to fair odds first)
+    opportunities.sort(key=lambda o: o.overround)
     return opportunities

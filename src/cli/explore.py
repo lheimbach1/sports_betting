@@ -244,85 +244,71 @@ def format_all_markets(event: Event) -> str:
 
 
 def format_arb_scan(opportunities: list[ArbOpportunity]) -> str:
-    """Format arbitrage scan results for display."""
+    """Format arbitrage scan results as a sorted table."""
     if not opportunities:
         return "  No opportunities found in the current odds range."
 
-    lines: list[str] = [f"Found {len(opportunities)} opportunity(ies):\n"]
+    from src.arbitrage.calculator import calculate_margin, calculate_stakes, snap_to_tick
 
-    for opp in opportunities:
-        fav_name = (
-            opp.home_team if opp.favorite == "1" else opp.away_team
-        )
-        underdog_name = (
-            opp.away_team if opp.favorite == "1" else opp.home_team
-        )
+    # Sort by ascending overround (lowest = closest to fair odds)
+    sorted_opps = sorted(opportunities, key=lambda o: o.overround)
 
-        lines.append(f"  {opp.home_team} vs {opp.away_team} ({opp.start_time})")
-        lines.append(f"  Favorite: {fav_name} ({opp.favorite}) at {opp.current_fav_odds:.2f}")
-        lines.append(
-            f"  Current odds:  1: {opp.home_odds:.2f} | X: {opp.draw_odds:.2f}"
-            f" | 2: {opp.away_odds:.2f}"
-        )
-        lines.append("")
+    # Build row data
+    rows: list[dict[str, str]] = []
+    for opp in sorted_opps:
+        fav_label = opp.favorite
+        match_name = f"{opp.home_team} vs {opp.away_team}"
 
-        # Pre-match bets
-        lines.append("  Pre-match bets (place now):")
-        lines.append(
-            f"    Draw (X) at {opp.draw_odds:.2f}"
-            f"  →  stake {opp.stakes['X']:.1f}% of budget"
-        )
+        # Breakeven and example margins — substitute example odds for the favorite
         if opp.favorite == "1":
-            lines.append(
-                f"    {underdog_name} (2) at {opp.away_odds:.2f}"
-                f"  →  stake {opp.stakes['2']:.1f}% of budget"
-            )
-        else:
-            lines.append(
-                f"    {underdog_name} (1) at {opp.home_odds:.2f}"
-                f"  →  stake {opp.stakes['1']:.1f}% of budget"
-            )
-        lines.append("")
+            margin_at_example = calculate_margin(opp.example_fav_odds, opp.draw_odds, opp.away_odds)
+        elif opp.favorite == "2":
+            margin_at_example = calculate_margin(opp.home_odds, opp.draw_odds, opp.example_fav_odds)
+        else:  # "X"
+            margin_at_example = calculate_margin(opp.home_odds, opp.example_fav_odds, opp.away_odds)
 
-        # In-play target
-        lines.append("  In-play target:")
-        lines.append(
-            f"    {fav_name} ({opp.favorite}) needs to reach"
-            f" ≥ {opp.target_fav_odds:.2f} for breakeven"
-        )
+        rows.append({
+            "Event": match_name,
+            "Time": opp.start_time,
+            "1": f"{opp.home_odds:.2f}",
+            "X": f"{opp.draw_odds:.2f}",
+            "2": f"{opp.away_odds:.2f}",
+            "Fav": fav_label,
+            "Over%": f"{opp.overround * 100:+.1f}%",
+            "BrkEvn": f"{opp.target_fav_odds:.2f}",
+            "Tgt+5%": f"{opp.example_fav_odds:.2f}",
+            "Profit": f"{margin_at_example * 100:.1f}%",
+        })
 
-        # Example at target margin
-        from src.arbitrage.calculator import calculate_margin, calculate_stakes, snap_to_tick
+    # Column widths — use max of header and data
+    columns = ["Event", "Time", "1", "X", "2", "Fav", "Over%", "BrkEvn", "Tgt+5%", "Profit"]
+    widths: dict[str, int] = {}
+    for col in columns:
+        widths[col] = max(len(col), *(len(r[col]) for r in rows))
 
-        margin_at_example = calculate_margin(
-            opp.example_fav_odds, opp.draw_odds,
-            opp.away_odds if opp.favorite == "1" else opp.home_odds,
-        )
-        fav_stake = (
-            opp.stakes["1"] if opp.favorite == "1" else opp.stakes["2"]
-        )
-        lines.append(
-            f"    At {opp.example_fav_odds:.2f} (5% margin)"
-            f" →  stake {fav_stake:.1f}% of budget"
-            f"  →  guaranteed {margin_at_example * 100:.1f}% profit"
-        )
+    # Build table
+    header = "  ".join(col.rjust(widths[col]) if col != "Event" else col.ljust(widths[col]) for col in columns)
+    separator = "  ".join("-" * widths[col] for col in columns)
 
-        # Example at higher odds (3.00 or target + 30%, whichever is more interesting)
-        higher_odds = snap_to_tick(max(3.00, opp.target_fav_odds * 1.20))
-        if opp.favorite == "1":
-            higher_stakes = calculate_stakes(higher_odds, opp.draw_odds, opp.away_odds)
-            higher_margin = calculate_margin(higher_odds, opp.draw_odds, opp.away_odds)
-            higher_fav_stake = higher_stakes["1"]
-        else:
-            higher_stakes = calculate_stakes(higher_odds, opp.draw_odds, opp.home_odds)
-            higher_margin = calculate_margin(higher_odds, opp.draw_odds, opp.home_odds)
-            higher_fav_stake = higher_stakes["2"]
-        lines.append(
-            f"    At {higher_odds:.2f} (target)"
-            f"     →  stake {higher_fav_stake:.1f}% of budget"
-            f"  →  guaranteed {higher_margin * 100:.1f}% profit"
+    lines: list[str] = [
+        f"Found {len(sorted_opps)} opportunity(ies), sorted by overround (ascending):\n",
+        f"  {header}",
+        f"  {separator}",
+    ]
+
+    for row in rows:
+        line = "  ".join(
+            row[col].rjust(widths[col]) if col != "Event" else row[col].ljust(widths[col])
+            for col in columns
         )
-        lines.append("")
+        lines.append(f"  {line}")
+
+    lines.append("")
+
+    # Legend
+    lines.append("  Over%  = overround (how far implied probabilities exceed 100%)")
+    lines.append("  BrkEvn = favorite odds needed in-play for breakeven")
+    lines.append("  Tgt+5% = favorite odds for 5% profit margin")
 
     return "\n".join(lines)
 
@@ -479,6 +465,8 @@ async def interactive_loop(page: Page, context: BrowserContext) -> None:
                 print("No categories found.")
                 break
 
+            print("\n  Type 'a' for arbitrage scan across ALL leagues")
+
             choice = prompt_choice(
                 [c["name"] for c in categories],
                 prompt="Select category",
@@ -487,6 +475,23 @@ async def interactive_loop(page: Page, context: BrowserContext) -> None:
                 return
             if choice == -1:
                 break  # back to sport selection
+            if isinstance(choice, str) and choice.lower() == "a":
+                # Load events from every category and run arb scan
+                print("\n=== Arbitrage Scanner — All Leagues ===")
+                all_events: list[Event] = []
+                seen_ids: set[str] = set()
+                for cat in categories:
+                    print(f"  Loading {cat['name']}...")
+                    cat_events, _ = await load_events(cat["url_part"], sport_enum)
+                    for ev in cat_events:
+                        if ev.id not in seen_ids:
+                            seen_ids.add(ev.id)
+                            all_events.append(ev)
+                print(f"\n  Loaded {len(all_events)} events across {len(categories)} leagues.\n")
+                opps = find_underdog_arbs(all_events)
+                print(format_arb_scan(opps))
+                input("Press Enter to continue...")
+                continue
             if isinstance(choice, str):
                 filtered = [c for c in categories if choice.lower() in c["name"].lower()]
                 if len(filtered) == 1:
@@ -538,8 +543,7 @@ async def interactive_loop(page: Page, context: BrowserContext) -> None:
                 if choice == -1:
                     break  # back to category selection
                 if isinstance(choice, str) and choice.lower() == "a":
-                    print("\n=== Underdog Arbitrage Scanner ===")
-                    print("Scanning for mild favorites (odds 1.20 - 1.80)...\n")
+                    print("\n=== Arbitrage Scanner ===\n")
                     opps = find_underdog_arbs(events)
                     print(format_arb_scan(opps))
                     input("Press Enter to continue...")

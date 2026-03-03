@@ -385,7 +385,7 @@ async def _connect_and_collect(snapshot: Snapshot, url_part: str) -> None:
 
         site_url = f"{SITE_BASE}{url_part}"
         logger.info("Connecting to %s", site_url)
-        await page.goto(site_url, wait_until="networkidle", timeout=45_000)
+        await page.goto(site_url, wait_until="domcontentloaded", timeout=45_000)
 
         # Wait for the snapshot data to arrive (with timeout)
         try:
@@ -442,7 +442,7 @@ async def _collect_all_markets(
 
         site_url = f"{SITE_BASE}{league_url_part}"
         logger.info("Loading league page: %s", site_url)
-        await page.goto(site_url, wait_until="networkidle", timeout=45_000)
+        await page.goto(site_url, wait_until="domcontentloaded", timeout=45_000)
 
         try:
             await asyncio.wait_for(received.wait(), timeout=20.0)
@@ -576,7 +576,7 @@ async def _connect_and_stream(
 
         site_url = f"{SITE_BASE}{url_part}"
         logger.info("Streaming from %s", site_url)
-        await page.goto(site_url, wait_until="networkidle", timeout=45_000)
+        await page.goto(site_url, wait_until="domcontentloaded", timeout=45_000)
 
         try:
             while True:
@@ -633,7 +633,7 @@ def _format_event_line(
 
     markets = event.markets
     if not show_all_markets:
-        markets = [m for m in markets if m.name == "Final Result"]
+        markets = [m for m in markets if m.name.lower() in {"final result", "1x2", "3-weg", "3-way (regular playing time)"}]
 
     for market in markets:
         odds_str = " | ".join(
@@ -655,12 +655,12 @@ def _find_1x2_odds(event: Event) -> tuple[float, float, float] | None:
     Returns (home, draw, away) odds or None if not found.
     """
     for market in event.markets:
-        if market.name != "Final Result":
+        if market.name.lower() not in {"final result", "1x2", "3-weg", "3-way (regular playing time)"}:
             continue
         odds: dict[str, float] = {}
         for outcome in market.outcomes:
             name_lower = outcome.name.lower()
-            if name_lower == "draw":
+            if name_lower in ("draw", "x"):
                 odds["X"] = outcome.odds
             elif event.home_team.lower() in name_lower or name_lower == "1":
                 odds["1"] = outcome.odds

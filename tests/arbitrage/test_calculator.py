@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.arbitrage.calculator import (
+    _find_1x2_odds,
     calculate_margin,
     calculate_stakes,
     calculate_target_odds,
@@ -233,3 +234,63 @@ def test_find_underdog_arbs_stakes_present():
     assert "2" in stakes
     total = stakes["1"] + stakes["X"] + stakes["2"]
     assert total == pytest.approx(100.0, abs=0.5)
+
+
+# ---------------------------------------------------------------------------
+# _find_1x2_odds — market name aliases
+# ---------------------------------------------------------------------------
+
+
+def _make_event_with_market_name(market_name: str) -> Event:
+    """Helper to create an Event with a custom market name for 1X2 odds."""
+    return Event(
+        id="urn:test:alias",
+        sport=Sport.FOOTBALL,
+        league="Test",
+        home_team="Home",
+        away_team="Away",
+        start_time=datetime(2026, 3, 15, 15, 30, tzinfo=timezone.utc),
+        markets=[
+            Market(
+                name=market_name,
+                outcomes=[
+                    Outcome(name="1", odds=1.50),
+                    Outcome(name="X", odds=3.80),
+                    Outcome(name="2", odds=5.00),
+                ],
+            ),
+        ],
+        provider="test",
+    )
+
+
+@pytest.mark.parametrize(
+    "market_name",
+    ["Final Result", "1x2", "1X2", "3-Weg", "3-way (regular playing time)"],
+)
+def test_find_1x2_odds_accepts_market_aliases(market_name: str):
+    """_find_1x2_odds should match all known market name aliases."""
+    event = _make_event_with_market_name(market_name)
+    result = _find_1x2_odds(event)
+    assert result == (1.50, 3.80, 5.00)
+
+
+def test_find_1x2_odds_rejects_unknown_market():
+    """_find_1x2_odds should return None for unrecognised market names."""
+    event = _make_event_with_market_name("Over/Under 2.5")
+    assert _find_1x2_odds(event) is None
+
+
+def test_find_underdog_arbs_with_1x2_market_name():
+    """find_underdog_arbs should work when market is named '1x2'."""
+    event = _make_event_with_market_name("1x2")
+    opps = find_underdog_arbs([event])
+    assert len(opps) == 1
+    assert opps[0].favorite == "1"
+
+
+def test_find_underdog_arbs_with_basketball_market_name():
+    """find_underdog_arbs should work with basketball 3-way market name."""
+    event = _make_event_with_market_name("3-way (regular playing time)")
+    opps = find_underdog_arbs([event])
+    assert len(opps) == 1
