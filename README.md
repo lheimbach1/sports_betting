@@ -1,3 +1,5 @@
+![CI](https://github.com/lheimbach1/sports_betting/actions/workflows/ci.yml/badge.svg)
+
 # Sports Betting Arbitrage Finder
 
 Detect arbitrage opportunities and mispriced bets across sports betting providers, with a focus on the Swiss market.
@@ -76,4 +78,4 @@ class MyProvider(BaseProvider):
 
 ## License
 
-MIT
+All rights reserved. No part of this software may be used, copied, modified, or distributed without explicit written permission from the author.
