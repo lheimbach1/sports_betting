@@ -248,7 +248,7 @@ def format_arb_scan(opportunities: list[ArbOpportunity]) -> str:
     if not opportunities:
         return "  No opportunities found in the current odds range."
 
-    from src.arbitrage.calculator import calculate_margin, calculate_stakes, snap_to_tick
+    from src.arbitrage.calculator import calculate_margin
 
     # Sort by ascending overround (lowest = closest to fair odds)
     sorted_opps = sorted(opportunities, key=lambda o: o.overround)
@@ -287,7 +287,10 @@ def format_arb_scan(opportunities: list[ArbOpportunity]) -> str:
         widths[col] = max(len(col), *(len(r[col]) for r in rows))
 
     # Build table
-    header = "  ".join(col.rjust(widths[col]) if col != "Event" else col.ljust(widths[col]) for col in columns)
+    header = "  ".join(
+        col.rjust(widths[col]) if col != "Event" else col.ljust(widths[col])
+        for col in columns
+    )
     separator = "  ".join("-" * widths[col] for col in columns)
 
     lines: list[str] = [

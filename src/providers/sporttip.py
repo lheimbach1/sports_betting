@@ -80,6 +80,11 @@ LEAGUE_URLS: dict[str, str] = {
 }
 DEFAULT_LEAGUES: list[str] = ["Bundesliga", "2. Bundesliga"]
 
+# Known aliases for the 1X2 / Final Result / 3-way market
+_1X2_MARKET_NAMES = {
+    "final result", "1x2", "3-weg", "3-way (regular playing time)",
+}
+
 # Max parallel browser tabs for loading event detail pages
 _DETAIL_CONCURRENCY = 3
 
@@ -633,7 +638,9 @@ def _format_event_line(
 
     markets = event.markets
     if not show_all_markets:
-        markets = [m for m in markets if m.name.lower() in {"final result", "1x2", "3-weg", "3-way (regular playing time)"}]
+        markets = [
+            m for m in markets if m.name.lower() in _1X2_MARKET_NAMES
+        ]
 
     for market in markets:
         odds_str = " | ".join(
@@ -655,7 +662,7 @@ def _find_1x2_odds(event: Event) -> tuple[float, float, float] | None:
     Returns (home, draw, away) odds or None if not found.
     """
     for market in event.markets:
-        if market.name.lower() not in {"final result", "1x2", "3-weg", "3-way (regular playing time)"}:
+        if market.name.lower() not in _1X2_MARKET_NAMES:
             continue
         odds: dict[str, float] = {}
         for outcome in market.outcomes:
