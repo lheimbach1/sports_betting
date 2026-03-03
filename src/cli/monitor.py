@@ -16,7 +16,9 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from datetime import timezone as tz
 from enum import Enum
+from typing import Any
 
 from playwright.async_api import Page, async_playwright
 
@@ -31,6 +33,18 @@ from src.cli.explore import (
 )
 from src.models.events import Event, Sport
 from src.providers.sporttip import LIVE_BASE, Snapshot, _connect_and_collect, _connect_and_stream
+
+# Admiral phase URN -> display label (football-centric)
+_PHASE_LABELS: dict[str, str] = {
+    "asw:phase:1": "Pre",
+    "asw:phase:6": "1H",
+    "asw:phase:7": "2H",
+    "asw:phase:8": "HT",
+    "asw:phase:9": "ET1",
+    "asw:phase:10": "ET2",
+    "asw:phase:11": "Pen",
+    "asw:phase:14": "FT",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -113,15 +127,14 @@ def _escape_applescript(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def send_notification(title: str, message: str, sound: str = "Glass") -> None:
-    """Send a macOS notification via osascript (non-blocking)."""
+def send_notification(title: str, message: str) -> None:
+    """Send a persistent macOS alert via osascript.
+
+    Uses ``display alert`` which stays on screen until the user clicks OK.
+    """
     safe_title = _escape_applescript(title)
     safe_msg = _escape_applescript(message)
-    script = (
-        f'display notification "{safe_msg}" '
-        f'with title "{safe_title}" '
-        f'sound name "{sound}"'
-    )
+    script = f'display alert "{safe_title}" message "{safe_msg}"'
     try:
         subprocess.Popen(  # noqa: S603
             ["osascript", "-e", script],
@@ -137,9 +150,54 @@ def send_notification(title: str, message: str, sound: str = "Glass") -> None:
 # ---------------------------------------------------------------------------
 
 
-def render_summary(alerts: list[Alert], update_count: int) -> str:
+def _match_time(raw_event: dict[str, Any]) -> str:
+    """Compute an approximate match clock string from raw snapshot event data.
+
+    Returns e.g. "1H 23'" or "2H 67'" or "HT" or "" if unknown.
+    """
+    phase = raw_event.get("phase", "")
+    label = _PHASE_LABELS.get(phase, "")
+
+    # Non-playing phases — just show the label
+    if label in ("Pre", "HT", "FT", "Pen", ""):
+        return label
+
+    start_str = str(raw_event.get("startTime", ""))
+    if not start_str:
+        return label
+
+    if start_str.endswith("Z"):
+        start_str = start_str[:-1] + "+00:00"
+    try:
+        start = datetime.fromisoformat(start_str)
+    except (ValueError, TypeError):
+        return label
+
+    elapsed_min = (datetime.now(tz=tz.utc) - start).total_seconds() / 60
+
+    # Rough football minute estimate
+    if label == "1H":
+        minute = min(int(elapsed_min), 45)
+    elif label == "2H":
+        minute = 45 + min(int(elapsed_min - 60), 45)  # ~15 min halftime
+    elif label == "ET1":
+        minute = 90 + min(int(elapsed_min - 120), 15)
+    elif label == "ET2":
+        minute = 105 + min(int(elapsed_min - 135), 15)
+    else:
+        minute = int(elapsed_min)
+
+    return f"{label} {max(minute, 1)}'"
+
+
+def render_summary(
+    alerts: list[Alert],
+    update_count: int,
+    match_times: dict[str, str] | None = None,
+) -> str:
     """Render the live alert summary table."""
     now = datetime.now().strftime("%H:%M:%S")
+    times = match_times or {}
     lines: list[str] = [
         f"=== Odds Monitor === (updates: {update_count}, last: {now})",
         "",
@@ -147,7 +205,8 @@ def render_summary(alerts: list[Alert], update_count: int) -> str:
 
     # Column headers
     hdr = (
-        f"  {'#':>3}  {'Event':<30} {'Market':<18} {'Outcome':<16}"
+        f"  {'#':>3}  {'Event':<30} {'Time':<8}"
+        f" {'Market':<18} {'Outcome':<16}"
         f" {'Odds':>5} {'Dir':>3} {'Thr':>6}   {'Status':<9}"
     )
     lines.append(hdr)
@@ -155,11 +214,13 @@ def render_summary(alerts: list[Alert], update_count: int) -> str:
 
     for i, a in enumerate(alerts, 1):
         ev = a.event_label[:30] if len(a.event_label) > 30 else a.event_label
+        mt = times.get(a.event_id, "")[:8]
         mk = a.market_name[:18] if len(a.market_name) > 18 else a.market_name
         oc = a.outcome_name[:16] if len(a.outcome_name) > 16 else a.outcome_name
         odds_str = f"{a.current_odds:.2f}" if a.current_odds else "  -  "
         lines.append(
-            f"  {i:>3}  {ev:<30} {mk:<18} {oc:<16}"
+            f"  {i:>3}  {ev:<30} {mt:<8}"
+            f" {mk:<18} {oc:<16}"
             f" {odds_str:>5} {a.direction.value:>3} {a.threshold:>6.2f}   {a.status.value:<9}"
         )
 
@@ -534,6 +595,11 @@ async def run_monitor(
             # Build a lookup by event id
             events_by_id: dict[str, Event] = {e.id: e for e in events}
 
+            # Compute match times from raw snapshot data
+            match_times: dict[str, str] = {}
+            for urn, raw in snapshot.events.items():
+                match_times[urn] = _match_time(raw)
+
             for alert in alerts:
                 event = events_by_id.get(alert.event_id)
                 if event is None:
@@ -559,7 +625,7 @@ async def run_monitor(
                     # Update current_odds even when not firing
                     alert.current_odds = current
 
-            _redraw(render_summary(alerts, update_count))
+            _redraw(render_summary(alerts, update_count, match_times))
     except KeyboardInterrupt:
         print("\nStopped.")
 

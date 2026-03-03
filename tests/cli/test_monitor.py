@@ -7,11 +7,12 @@ from unittest.mock import patch
 
 import pytest
 
-from src.cli.monitor import (  # noqa: I001
+from src.cli.monitor import (
     Alert,
     AlertStatus,
     Direction,
     _escape_applescript,
+    _match_time,
     render_summary,
     send_notification,
 )
@@ -169,7 +170,7 @@ class TestSendNotification:
         assert cmd[1] == "-e"
         assert "Title" in cmd[2]
         assert "Message" in cmd[2]
-        assert "Glass" in cmd[2]
+        assert "display alert" in cmd[2]
 
     @patch("src.cli.monitor.subprocess.Popen")
     def test_escapes_special_chars_in_args(self, mock_popen: object) -> None:
@@ -237,3 +238,52 @@ class TestRenderSummary:
     def test_update_count_shown(self, count: int) -> None:
         out = render_summary([], count)
         assert f"updates: {count}" in out
+
+    def test_shows_match_time(self) -> None:
+        alerts = self._make_alerts()
+        times = {"e1": "2H 67'"}
+        out = render_summary(alerts, 1, match_times=times)
+        assert "2H 67'" in out
+
+    def test_shows_time_column_header(self) -> None:
+        out = render_summary(self._make_alerts(), 0)
+        assert "Time" in out
+
+
+# ---------------------------------------------------------------------------
+# _match_time
+# ---------------------------------------------------------------------------
+
+
+class TestMatchTime:
+    def test_halftime_label(self) -> None:
+        assert _match_time({"phase": "asw:phase:8"}) == "HT"
+
+    def test_full_time_label(self) -> None:
+        assert _match_time({"phase": "asw:phase:14"}) == "FT"
+
+    def test_pre_match_label(self) -> None:
+        assert _match_time({"phase": "asw:phase:1"}) == "Pre"
+
+    def test_unknown_phase_empty(self) -> None:
+        assert _match_time({"phase": "asw:phase:999"}) == ""
+
+    def test_no_phase_empty(self) -> None:
+        assert _match_time({}) == ""
+
+    def test_first_half_shows_minute(self) -> None:
+        from datetime import datetime, timezone
+
+        # Started 20 minutes ago
+        start = datetime.now(tz=timezone.utc).replace(microsecond=0)
+        start = start.replace(
+            minute=start.minute - 20 if start.minute >= 20 else start.minute + 40,
+            hour=start.hour if start.minute >= 20 else start.hour - 1,
+        )
+        raw = {
+            "phase": "asw:phase:6",
+            "startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        result = _match_time(raw)
+        assert result.startswith("1H")
+        assert "'" in result
