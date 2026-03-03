@@ -402,7 +402,7 @@ def prompt_choice(
     if not raw or raw.lower() == "q":
         return None
     if raw.lower() == "b" and allow_back:
-        return -1  # type: ignore[return-value]  # sentinel for "back"
+        return -1  # sentinel for "back"
 
     try:
         idx = int(raw) - 1
