@@ -17,7 +17,13 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page, async_playwright
 
-from src.arbitrage.calculator import ArbOpportunity, find_underdog_arbs
+from src.arbitrage.calculator import (
+    ArbOpportunity,
+    WinnerOverround,
+    calculate_event_overrounds,
+    calculate_winner_overround,
+    find_underdog_arbs,
+)
 from src.models.events import Event, Sport
 from src.providers.sporttip import (
     _EVENT_LINK_SELECTOR,
@@ -36,6 +42,19 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Discovery — scrape sport / category links from the Sporttip DOM
 # ---------------------------------------------------------------------------
+
+
+def _split_name_count(text: str) -> tuple[str, str]:
+    """Split scraped link text into (name, count).
+
+    The Sporttip DOM often renders link text as "Football\\n123" where the
+    second line is an event count.  Returns ("Football", "123") or
+    ("Football", "") when there is no count.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) >= 2 and lines[-1].isdigit():
+        return " ".join(lines[:-1]), lines[-1]
+    return " ".join(lines), ""
 
 
 async def discover_sports(page: Page) -> list[dict[str, str]]:
@@ -63,7 +82,12 @@ async def discover_sports(page: Page) -> list[dict[str, str]]:
         if url_part in seen:
             continue
         seen.add(url_part)
-        sports.append({"name": text, "url_part": url_part})
+        # inner_text may contain a count on a second line (e.g. "Football\n123")
+        name, count = _split_name_count(text)
+        entry: dict[str, str] = {"name": name, "url_part": url_part}
+        if count:
+            entry["count"] = count
+        sports.append(entry)
 
     if sports:
         return sports
@@ -105,7 +129,11 @@ async def discover_categories(
         if url_part in seen or url_part == sport_url_part:
             continue
         seen.add(url_part)
-        categories.append({"name": text, "url_part": url_part})
+        name, count = _split_name_count(text)
+        entry: dict[str, str] = {"name": name, "url_part": url_part}
+        if count:
+            entry["count"] = count
+        categories.append(entry)
 
     if categories:
         return categories
@@ -201,24 +229,50 @@ async def fetch_event_detail(
 
 
 def format_events_table(events: list[Event]) -> str:
-    """Format events as a numbered table with primary market (1X2) odds."""
+    """Format events as a numbered table with primary market odds.
+
+    For team sports (home/away): shows 1X2 columns.
+    For non-team sports (e.g. F1): shows event name, selections count, kickoff.
+    """
+    if not events:
+        return "  No events."
+
+    # Detect non-team sport: away_team is empty
+    is_team_sport = any(e.away_team for e in events)
+
     lines: list[str] = []
-    lines.append(f"  {'#':>3}  {'Match':<40} {'1':>6} {'X':>6} {'2':>6}  Kickoff")
-    lines.append("  " + "-" * 78)
 
-    for i, event in enumerate(events, 1):
-        match_str = f"{event.home_team} vs {event.away_team}"
-        if len(match_str) > 40:
-            match_str = match_str[:37] + "..."
+    if is_team_sport:
+        lines.append(f"  {'#':>3}  {'Match':<40} {'1':>6} {'X':>6} {'2':>6}  Kickoff")
+        lines.append("  " + "-" * 78)
 
-        odds = _find_1x2_odds(event)
-        if odds:
-            o1, ox, o2 = f"{odds[0]:.2f}", f"{odds[1]:.2f}", f"{odds[2]:.2f}"
-        else:
-            o1 = ox = o2 = "  -  "
+        for i, event in enumerate(events, 1):
+            match_str = f"{event.home_team} vs {event.away_team}"
+            if len(match_str) > 40:
+                match_str = match_str[:37] + "..."
 
-        kickoff = event.start_time.strftime("%a %H:%M")
-        lines.append(f"  {i:>3}  {match_str:<40} {o1:>6} {ox:>6} {o2:>6}  {kickoff}")
+            odds = _find_1x2_odds(event)
+            if odds:
+                o1, ox, o2 = f"{odds[0]:.2f}", f"{odds[1]:.2f}", f"{odds[2]:.2f}"
+            else:
+                o1 = ox = o2 = "  -  "
+
+            kickoff = event.start_time.strftime("%a %H:%M")
+            lines.append(f"  {i:>3}  {match_str:<40} {o1:>6} {ox:>6} {o2:>6}  {kickoff}")
+    else:
+        lines.append(f"  {'#':>3}  {'Event':<40} {'Sels':>5}  Kickoff")
+        lines.append("  " + "-" * 60)
+
+        for i, event in enumerate(events, 1):
+            name = event.home_team or "(unnamed)"
+            if len(name) > 40:
+                name = name[:37] + "..."
+
+            # Count selections in the primary (largest) market
+            sel_count = max((len(m.outcomes) for m in event.markets), default=0)
+
+            kickoff = event.start_time.strftime("%a %H:%M")
+            lines.append(f"  {i:>3}  {name:<40} {sel_count:>5}  {kickoff}")
 
     return "\n".join(lines)
 
@@ -226,7 +280,10 @@ def format_events_table(events: list[Event]) -> str:
 def format_all_markets(event: Event) -> str:
     """Format all markets for an event in a readable layout."""
     lines: list[str] = []
-    lines.append(f"{event.home_team} vs {event.away_team}")
+    if event.away_team:
+        lines.append(f"{event.home_team} vs {event.away_team}")
+    else:
+        lines.append(event.home_team)
     kickoff = event.start_time.strftime("%a %d %b %H:%M")
     lines.append(f"  League: {event.league} | Kickoff: {kickoff}")
     lines.append("")
@@ -316,6 +373,52 @@ def format_arb_scan(opportunities: list[ArbOpportunity]) -> str:
     return "\n".join(lines)
 
 
+def format_overround_scan(results: list[WinnerOverround]) -> str:
+    """Format overround scan results for N-way winner markets."""
+    if not results:
+        return "  No winner markets found."
+
+    rows: list[dict[str, str]] = []
+    for r in results:
+        rows.append({
+            "Event": r.event_name,
+            "Market": r.market_name,
+            "Sels": str(r.selection_count),
+            "Overround": f"{r.overround * 100:+.1f}%",
+        })
+
+    columns = ["Event", "Market", "Sels", "Overround"]
+    widths: dict[str, int] = {}
+    for col in columns:
+        widths[col] = max(len(col), *(len(row[col]) for row in rows))
+
+    header = "  ".join(
+        col.ljust(widths[col]) if col in ("Event", "Market") else col.rjust(widths[col])
+        for col in columns
+    )
+    separator = "  ".join("-" * widths[col] for col in columns)
+
+    lines: list[str] = [
+        f"Found {len(results)} event(s) with winner markets:\n",
+        f"  {header}",
+        f"  {separator}",
+    ]
+
+    for row in rows:
+        line = "  ".join(
+            row[col].ljust(widths[col])
+            if col in ("Event", "Market")
+            else row[col].rjust(widths[col])
+            for col in columns
+        )
+        lines.append(f"  {line}")
+
+    lines.append("")
+    lines.append("  Overround = sum(1/odds) - 1  (lower = closer to fair odds)")
+
+    return "\n".join(lines)
+
+
 def _format_watch_snapshot(
     event: Event,
     prev_odds: dict[str, float],
@@ -374,17 +477,42 @@ def prompt_choice(
     items: list[str],
     prompt: str = "Select",
     allow_back: bool = True,
+    extras: list[str] | None = None,
+    extras_header: str = "Count",
 ) -> int | str | None:
     """Display a numbered list and get user input.
+
+    Args:
+        extras: Optional per-item values shown in a right-hand column.
+        extras_header: Column header for the extras column.
 
     Returns:
         int — selected index (0-based)
         str — text filter typed by the user
         None — user chose to go back or quit
     """
-    print()
-    for i, item in enumerate(items, 1):
-        print(f"  {i:>3}. {item}")
+    max_len = max((len(item) for item in items), default=4)
+    idx_w = len(str(len(items)))
+
+    has_extras = extras and any(extras)
+    if has_extras:
+        assert extras is not None
+        ext_w = max(len(extras_header), *(len(e) for e in extras))
+        print()
+        print(
+            f"  {'#':>{idx_w}}  {'Name':<{max_len}}"
+            f"  {extras_header:>{ext_w}}"
+        )
+        print(f"  {'-' * idx_w}  {'-' * max_len}  {'-' * ext_w}")
+        for i, item in enumerate(items, 1):
+            ext = extras[i - 1] if i - 1 < len(extras) else ""
+            print(f"  {i:>{idx_w}}  {item:<{max_len}}  {ext:>{ext_w}}")
+    else:
+        print()
+        print(f"  {'#':>{idx_w}}  {'Name':<{max_len}}")
+        print(f"  {'-' * idx_w}  {'-' * max_len}")
+        for i, item in enumerate(items, 1):
+            print(f"  {i:>{idx_w}}  {item}")
 
     controls = []
     if allow_back:
@@ -409,7 +537,9 @@ def prompt_choice(
         if 0 <= idx < len(items):
             return idx
         print(f"  Number out of range (1-{len(items)}).")
-        return prompt_choice(items, prompt, allow_back)
+        return prompt_choice(
+            items, prompt, allow_back, extras, extras_header,
+        )
     except ValueError:
         # Treat as text filter
         return raw
@@ -435,6 +565,8 @@ async def interactive_loop(page: Page, context: BrowserContext) -> None:
             [s["name"] for s in sports],
             prompt="Select sport",
             allow_back=False,
+            extras=[s.get("count", "") for s in sports],
+            extras_header="Events",
         )
         if choice is None:
             return
@@ -473,6 +605,8 @@ async def interactive_loop(page: Page, context: BrowserContext) -> None:
             choice = prompt_choice(
                 [c["name"] for c in categories],
                 prompt="Select category",
+                extras=[c.get("count", "") for c in categories],
+                extras_header="Events",
             )
             if choice is None:
                 return
@@ -491,8 +625,12 @@ async def interactive_loop(page: Page, context: BrowserContext) -> None:
                             seen_ids.add(ev.id)
                             all_events.append(ev)
                 print(f"\n  Loaded {len(all_events)} events across {len(categories)} leagues.\n")
-                opps = find_underdog_arbs(all_events)
-                print(format_arb_scan(opps))
+                if sport_enum == Sport.MOTOR_SPORTS:
+                    results = calculate_winner_overround(all_events)
+                    print(format_overround_scan(results))
+                else:
+                    opps = find_underdog_arbs(all_events)
+                    print(format_arb_scan(opps))
                 input("Press Enter to continue...")
                 continue
             if isinstance(choice, str):
@@ -537,8 +675,12 @@ async def interactive_loop(page: Page, context: BrowserContext) -> None:
                 print(format_events_table(events))
                 print("\n  Type 'a' for arbitrage scan")
 
+                event_labels = [
+                    f"{e.home_team} vs {e.away_team}" if e.away_team else e.home_team
+                    for e in events
+                ]
                 choice = prompt_choice(
-                    [f"{e.home_team} vs {e.away_team}" for e in events],
+                    event_labels,
                     prompt="Select event (number/filter)",
                 )
                 if choice is None:
@@ -546,9 +688,14 @@ async def interactive_loop(page: Page, context: BrowserContext) -> None:
                 if choice == -1:
                     break  # back to category selection
                 if isinstance(choice, str) and choice.lower() == "a":
-                    print("\n=== Arbitrage Scanner ===\n")
-                    opps = find_underdog_arbs(events)
-                    print(format_arb_scan(opps))
+                    if sport_enum == Sport.MOTOR_SPORTS:
+                        print("\n=== Overround Scanner ===\n")
+                        results = calculate_winner_overround(events)
+                        print(format_overround_scan(results))
+                    else:
+                        print("\n=== Arbitrage Scanner ===\n")
+                        opps = find_underdog_arbs(events)
+                        print(format_arb_scan(opps))
                     input("Press Enter to continue...")
                     continue
                 if isinstance(choice, str):
@@ -566,7 +713,10 @@ async def interactive_loop(page: Page, context: BrowserContext) -> None:
                         selected_idx = filtered_events[0][0]
                     else:
                         choice2 = prompt_choice(
-                            [f"{e.home_team} vs {e.away_team}" for _, e in filtered_events],
+                            [
+                                f"{e.home_team} vs {e.away_team}" if e.away_team else e.home_team
+                                for _, e in filtered_events
+                            ],
                             prompt="Select event",
                         )
                         if choice2 is None or isinstance(choice2, str):
@@ -599,11 +749,15 @@ async def event_action_menu(
     sport: Sport,
 ) -> None:
     """Show action menu for a selected event: fetch all markets or watch."""
-    print(f"\n{event.home_team} vs {event.away_team}")
+    if event.away_team:
+        print(f"\n{event.home_team} vs {event.away_team}")
+    else:
+        print(f"\n{event.home_team}")
     print(f"  {event.league} — {event.start_time.strftime('%a %d %b %H:%M')}")
 
     while True:
         print("\n  (f) Fetch all markets (one-shot)")
+        print("  (a) Overround analysis")
         print("  (w) Watch all markets (live stream)")
         print("  (b) Back")
 
@@ -616,7 +770,22 @@ async def event_action_menu(
         if raw == "b":
             return
 
-        if raw == "f":
+        if raw == "a":
+            # Fetch full markets then show per-market overround
+            target = event
+            if detail_url:
+                print("\nLoading all markets...")
+                detailed = await fetch_event_detail(
+                    context, detail_url, sport,
+                )
+                if detailed:
+                    target = detailed
+            results = calculate_event_overrounds(target)
+            print(f"\n=== Overround — {target.home_team} ===\n")
+            print(format_overround_scan(results))
+            input("\nPress Enter to continue...")
+
+        elif raw == "f":
             if detail_url:
                 print("\nLoading all markets...")
                 detailed = await fetch_event_detail(context, detail_url, sport)
@@ -640,7 +809,7 @@ async def event_action_menu(
             await watch_event(url_part, sport, event.id)
 
         else:
-            print("  Invalid choice. Use 'f', 'w', or 'b'.")
+            print("  Invalid choice. Use 'f', 'a', 'w', or 'b'.")
 
 
 async def watch_event(

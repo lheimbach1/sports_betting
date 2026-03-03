@@ -59,6 +59,7 @@ SPORT_URL_PARTS: dict[Sport, str] = {
     Sport.TENNIS: "/tennis",
     Sport.BASKETBALL: "/basketball",
     Sport.HANDBALL: "/handball",
+    Sport.MOTOR_SPORTS: "/motor-sports",
 }
 
 # Reverse mapping: URL slug -> Sport enum
@@ -164,6 +165,10 @@ class Snapshot:
                     home_name = name
                 elif ec.get("qualifier") == "away":
                     away_name = name
+
+            # For non-team sports (e.g. F1), use event name when no home/away
+            if not home_name and not away_name:
+                home_name = _get_translated_name(raw_event)
 
             comp_urn = raw_event.get("competition", "")
             competition = self.competitions.get(comp_urn, {})

@@ -206,3 +206,75 @@ def find_underdog_arbs(
     # Sort by overround (ascending — closest to fair odds first)
     opportunities.sort(key=lambda o: o.overround)
     return opportunities
+
+
+@dataclass
+class WinnerOverround:
+    """Overround result for an N-way winner market."""
+
+    event_name: str
+    market_name: str
+    selection_count: int
+    overround: float  # e.g. 0.25 = 25%
+
+
+def calculate_winner_overround(events: list[Event]) -> list[WinnerOverround]:
+    """Calculate overround for N-way winner markets (e.g. F1 race winner).
+
+    For each event, finds the first market with 3+ outcomes and computes
+    the overround as sum(1/odds) - 1.
+
+    Returns results sorted by overround ascending.
+    """
+    results: list[WinnerOverround] = []
+
+    for event in events:
+        # Find the first market with 3+ outcomes (the "Winner" market)
+        winner_market = None
+        for market in event.markets:
+            if len(market.outcomes) >= 3:
+                winner_market = market
+                break
+
+        if winner_market is None:
+            continue
+
+        implied_sum = sum(1 / o.odds for o in winner_market.outcomes)
+        overround = implied_sum - 1
+
+        event_name = event.home_team if event.home_team else event.away_team
+        results.append(WinnerOverround(
+            event_name=event_name,
+            market_name=winner_market.name,
+            selection_count=len(winner_market.outcomes),
+            overround=overround,
+        ))
+
+    results.sort(key=lambda r: r.overround)
+    return results
+
+
+def calculate_event_overrounds(event: Event) -> list[WinnerOverround]:
+    """Calculate overround for every market in a single event.
+
+    Unlike ``calculate_winner_overround`` (which picks one market per event),
+    this returns overround for *all* markets with 2+ outcomes — useful for
+    inspecting a single F1 race's Winner, Podium, Top 6, H2H markets, etc.
+    """
+    results: list[WinnerOverround] = []
+    event_name = event.home_team if event.home_team else event.away_team
+
+    for market in event.markets:
+        if len(market.outcomes) < 2:
+            continue
+        implied_sum = sum(1 / o.odds for o in market.outcomes)
+        overround = implied_sum - 1
+        results.append(WinnerOverround(
+            event_name=event_name,
+            market_name=market.name,
+            selection_count=len(market.outcomes),
+            overround=overround,
+        ))
+
+    results.sort(key=lambda r: r.overround)
+    return results

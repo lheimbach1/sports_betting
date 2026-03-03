@@ -6,9 +6,11 @@ import pytest
 
 from src.arbitrage.calculator import (
     _find_1x2_odds,
+    calculate_event_overrounds,
     calculate_margin,
     calculate_stakes,
     calculate_target_odds,
+    calculate_winner_overround,
     find_underdog_arbs,
     snap_to_tick,
 )
@@ -294,3 +296,144 @@ def test_find_underdog_arbs_with_basketball_market_name():
     event = _make_event_with_market_name("3-way (regular playing time)")
     opps = find_underdog_arbs([event])
     assert len(opps) == 1
+
+
+# ---------------------------------------------------------------------------
+# calculate_winner_overround
+# ---------------------------------------------------------------------------
+
+
+def _make_f1_event(
+    name: str,
+    market_name: str = "Winner",
+    odds: list[float] | None = None,
+) -> Event:
+    """Helper to create an F1-style event with an N-way winner market."""
+    if odds is None:
+        odds = [2.50, 3.00, 5.00, 10.00, 15.00]
+    return Event(
+        id=f"urn:test:{name.lower().replace(' ', '_')}",
+        sport=Sport.MOTOR_SPORTS,
+        league="Formula 1",
+        home_team=name,
+        start_time=datetime(2026, 3, 15, 15, 30, tzinfo=timezone.utc),
+        markets=[
+            Market(
+                name=market_name,
+                outcomes=[
+                    Outcome(name=f"Driver {i+1}", odds=o)
+                    for i, o in enumerate(odds)
+                ],
+            ),
+        ],
+        provider="test",
+    )
+
+
+def test_calculate_winner_overround_basic():
+    """Overround for known odds should match manual calculation."""
+    # 1/2.5 + 1/3.0 + 1/5.0 + 1/10.0 + 1/15.0 = 0.4+0.333+0.2+0.1+0.067 = 1.1 -> 10%
+    event = _make_f1_event("Australian GP", odds=[2.50, 3.00, 5.00, 10.00, 15.00])
+    results = calculate_winner_overround([event])
+    assert len(results) == 1
+    assert results[0].event_name == "Australian GP"
+    assert results[0].market_name == "Winner"
+    assert results[0].selection_count == 5
+    assert results[0].overround == pytest.approx(0.10, abs=0.01)
+
+
+def test_calculate_winner_overround_multiple_events():
+    """Multiple events should all be returned, sorted by overround."""
+    event_low = _make_f1_event("Low Over GP", odds=[3.00, 4.00, 5.00])
+    # 1/3 + 1/4 + 1/5 = 0.333 + 0.25 + 0.2 = 0.783 -> -21.7% (under-round)
+    event_high = _make_f1_event("High Over GP", odds=[1.50, 2.00, 3.00])
+    # 1/1.5 + 1/2.0 + 1/3.0 = 0.667 + 0.5 + 0.333 = 1.5 -> 50%
+    results = calculate_winner_overround([event_high, event_low])
+    assert len(results) == 2
+    # Should be sorted ascending: low overround first
+    assert results[0].event_name == "Low Over GP"
+    assert results[1].event_name == "High Over GP"
+
+
+def test_calculate_winner_overround_no_markets():
+    """Events without markets should be skipped."""
+    event = Event(
+        id="urn:test:no_market_f1",
+        sport=Sport.MOTOR_SPORTS,
+        league="Formula 1",
+        home_team="Empty GP",
+        start_time=datetime(2026, 3, 15, 15, 30, tzinfo=timezone.utc),
+        markets=[],
+        provider="test",
+    )
+    results = calculate_winner_overround([event])
+    assert len(results) == 0
+
+
+def test_calculate_winner_overround_skips_two_way_markets():
+    """Markets with fewer than 3 outcomes should be skipped."""
+    event = Event(
+        id="urn:test:two_way",
+        sport=Sport.MOTOR_SPORTS,
+        league="Formula 1",
+        home_team="Two-Way GP",
+        start_time=datetime(2026, 3, 15, 15, 30, tzinfo=timezone.utc),
+        markets=[
+            Market(
+                name="Head to Head",
+                outcomes=[
+                    Outcome(name="Driver A", odds=1.80),
+                    Outcome(name="Driver B", odds=2.00),
+                ],
+            ),
+        ],
+        provider="test",
+    )
+    results = calculate_winner_overround([event])
+    assert len(results) == 0
+
+
+# ---------------------------------------------------------------------------
+# calculate_event_overrounds
+# ---------------------------------------------------------------------------
+
+
+def test_calculate_event_overrounds_all_markets():
+    """Should return overround for every market with 2+ outcomes."""
+    event = Event(
+        id="urn:test:multi_market",
+        sport=Sport.MOTOR_SPORTS,
+        league="Formula 1",
+        home_team="Australian GP",
+        start_time=datetime(2026, 3, 15, 15, 30, tzinfo=timezone.utc),
+        markets=[
+            Market(
+                name="Winner",
+                outcomes=[
+                    Outcome(name="Driver A", odds=2.50),
+                    Outcome(name="Driver B", odds=3.00),
+                    Outcome(name="Driver C", odds=5.00),
+                ],
+            ),
+            Market(
+                name="Head to Head",
+                outcomes=[
+                    Outcome(name="Driver A", odds=1.80),
+                    Outcome(name="Driver B", odds=2.00),
+                ],
+            ),
+            Market(
+                name="Single outcome",
+                outcomes=[
+                    Outcome(name="Yes", odds=1.50),
+                ],
+            ),
+        ],
+        provider="test",
+    )
+    results = calculate_event_overrounds(event)
+    # Single-outcome market should be excluded
+    assert len(results) == 2
+    market_names = {r.market_name for r in results}
+    assert "Winner" in market_names
+    assert "Head to Head" in market_names

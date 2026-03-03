@@ -10,6 +10,7 @@ class Sport(str, Enum):
     TENNIS = "tennis"
     BASKETBALL = "basketball"
     HANDBALL = "handball"
+    MOTOR_SPORTS = "motor_sports"
 
 
 class Outcome(BaseModel):
@@ -32,8 +33,8 @@ class Event(BaseModel):
     id: str
     sport: Sport
     league: str
-    home_team: str
-    away_team: str
+    home_team: str = ""
+    away_team: str = ""
     start_time: datetime
     markets: list[Market]
     provider: str
