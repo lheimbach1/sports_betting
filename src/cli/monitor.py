@@ -30,7 +30,7 @@ from src.cli.explore import (
     prompt_choice,
 )
 from src.models.events import Event, Sport
-from src.providers.sporttip import Snapshot, _connect_and_stream
+from src.providers.sporttip import LIVE_BASE, Snapshot, _connect_and_collect, _connect_and_stream
 
 logger = logging.getLogger(__name__)
 
@@ -203,38 +203,125 @@ def _filter_pick(
     return None
 
 
+async def _discover_live_sports(page: Page) -> list[dict[str, str]]:
+    """Scrape sport links from the Sporttip live page."""
+    await page.goto(LIVE_BASE, wait_until="networkidle", timeout=45_000)
+    link_els = await page.query_selector_all('a[href*="/en/sporttip/live/"]')
+    sports: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for el in link_els:
+        href = await el.get_attribute("href") or ""
+        text = (await el.inner_text()).strip()
+        if not href or not text:
+            continue
+        # Extract path after /live/ (e.g. "football")
+        suffix = href.split("/en/sporttip/live/")[-1]
+        # Only keep top-level sport slugs (no query params, no sub-paths)
+        if not suffix or "/" in suffix or "?" in suffix:
+            continue
+        if suffix in seen:
+            continue
+        seen.add(suffix)
+        name, _count = _split_name_count(text)
+        sports.append({"name": name, "url_part": f"/live/{suffix}", "slug": suffix})
+    return sports
+
+
+def _split_name_count(text: str) -> tuple[str, str]:
+    """Split "Football\\n3" into ("Football", "3")."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) >= 2 and lines[-1].isdigit():
+        return " ".join(lines[:-1]), lines[-1]
+    return " ".join(lines), ""
+
+
+async def _load_live_events(
+    url: str, sport: Sport,
+) -> list[Event]:
+    """Load events from a full live URL via WebSocket snapshot."""
+    snapshot = Snapshot()
+    await _connect_and_collect(snapshot, url)
+    return snapshot.build_events(sport)
+
+
 async def setup_alerts(page: Page) -> tuple[list[Alert], str, Sport] | None:
     """Interactive flow: pick sport -> category -> events -> markets -> thresholds.
 
     Returns (alerts, category_url_part, sport) or None if user quits.
     """
-    # --- Sport selection ---
+    # --- Sport selection (with Live as first option) ---
     print("\nLoading sports...")
     sports = await discover_sports(page)
     if not sports:
         print("No sports found.")
         return None
 
+    # Prepend "Live" as the first option
+    live_entry: dict[str, str] = {"name": "** Live **", "url_part": "/live"}
+    all_sports = [live_entry] + sports
+
     choice: int | str | None = None
     selected_sport: dict[str, str] | None = None
     while selected_sport is None:
         choice = prompt_choice(
-            [s["name"] for s in sports],
+            [s["name"] for s in all_sports],
             prompt="Select sport",
             allow_back=False,
-            extras=[s.get("count", "") for s in sports],
+            extras=[s.get("count", "") for s in all_sports],
             extras_header="Events",
         )
         if choice is None:
             return None
         if isinstance(choice, str):
-            selected_sport = _filter_pick(sports, "name", choice, "Select sport")
+            selected_sport = _filter_pick(all_sports, "name", choice, "Select sport")
             continue
-        selected_sport = sports[choice]
+        selected_sport = all_sports[choice]
 
+    is_live = selected_sport is live_entry
+
+    # --- Live path: pick live sport -> load events directly ---
+    if is_live:
+        print("\nLoading live sports...")
+        live_sports = await _discover_live_sports(page)
+        if not live_sports:
+            print("No live sports found.")
+            return None
+
+        selected_live: dict[str, str] | None = None
+        while selected_live is None:
+            choice = prompt_choice(
+                [ls["name"] for ls in live_sports],
+                prompt="Select live sport",
+                allow_back=False,
+            )
+            if choice is None:
+                return None
+            if isinstance(choice, str):
+                selected_live = _filter_pick(
+                    live_sports, "name", choice, "Select live sport",
+                )
+                continue
+            selected_live = live_sports[choice]
+
+        sport_enum = _sport_from_url(f"/{selected_live['slug']}")
+        live_url = f"{LIVE_BASE}/{selected_live['slug']}"
+        category_url_part = live_url  # full URL — sporttip.py handles this
+
+        print(f"\nLoading live events for {selected_live['name']}...")
+        events = await _load_live_events(live_url, sport_enum)
+        if not events:
+            print("No live events found.")
+            return None
+
+        cat_label = f"Live {selected_live['name']}"
+        print(f"\nAll alerts must be within: {cat_label}")
+        print("  (one WebSocket connection)\n")
+
+        return _pick_alerts(events, cat_label, category_url_part, sport_enum)
+
+    # --- Regular path: sport -> category -> events ---
     sport_enum = _sport_from_url(selected_sport["url_part"])
 
-    # --- Category selection (with sub-category drill-down) ---
     print(f"\nLoading categories for {selected_sport['name']}...")
     categories = await discover_categories(page, selected_sport["url_part"])
     if not categories:
@@ -261,7 +348,6 @@ async def setup_alerts(page: Page) -> tuple[list[Alert], str, Sport] | None:
     category_url_part = selected_cat["url_part"]
     print(f"\nChecking for sub-categories in {selected_cat['name']}...")
     sub_cats = await discover_categories(page, category_url_part)
-    # Filter out the parent itself and anything at the same level
     sub_cats = [sc for sc in sub_cats if sc["url_part"] != category_url_part]
 
     if sub_cats:
@@ -276,7 +362,6 @@ async def setup_alerts(page: Page) -> tuple[list[Alert], str, Sport] | None:
                 extras_header="Events",
             )
             if choice is None:
-                # Use the parent category
                 break
             if isinstance(choice, str):
                 selected_sub = _filter_pick(
@@ -292,27 +377,34 @@ async def setup_alerts(page: Page) -> tuple[list[Alert], str, Sport] | None:
     print(f"\nAll alerts must be within: {selected_cat['name']}")
     print("  (one WebSocket connection per category)\n")
 
-    # --- Event + market + threshold loop ---
+    # Load events for the regular path
+    print(f"Loading events for {selected_cat['name']}...")
+    events, _ = await load_events(category_url_part, sport_enum)
+    if not events:
+        print("No events found.")
+        return None
+
+    return _pick_alerts(events, selected_cat["name"], category_url_part, sport_enum)
+
+
+def _pick_alerts(
+    events: list[Event],
+    label: str,
+    category_url_part: str,
+    sport: Sport,
+) -> tuple[list[Alert], str, Sport] | None:
+    """Event -> market -> outcome -> threshold loop. Shared by live & regular paths."""
     alerts: list[Alert] = []
-    events: list[Event] | None = None
 
     while True:
-        # Load events (reuse if already loaded)
-        if events is None:
-            print(f"Loading events for {selected_cat['name']}...")
-            events, _ = await load_events(category_url_part, sport_enum)
-            if not events:
-                print("No events found.")
-                return None
-
-        print(f"\n{selected_cat['name']} — {len(events)} events:\n")
+        print(f"\n{label} — {len(events)} events:\n")
         print(format_events_table(events))
 
         event_labels = [
             f"{e.home_team} vs {e.away_team}" if e.away_team else e.home_team
             for e in events
         ]
-        ev_choice = prompt_choice(
+        ev_choice: int | str | None = prompt_choice(
             event_labels,
             prompt="Select event",
             allow_back=False,
@@ -322,7 +414,6 @@ async def setup_alerts(page: Page) -> tuple[list[Alert], str, Sport] | None:
                 break  # proceed with existing alerts
             return None
         if isinstance(ev_choice, str):
-            # Text filter on events
             needle = ev_choice.lower()
             filtered_events = [
                 (i, e) for i, e in enumerate(events)
@@ -418,7 +509,7 @@ async def setup_alerts(page: Page) -> tuple[list[Alert], str, Sport] | None:
     if not alerts:
         return None
 
-    return alerts, category_url_part, sport_enum
+    return alerts, category_url_part, sport
 
 
 # ---------------------------------------------------------------------------
