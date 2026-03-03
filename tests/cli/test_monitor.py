@@ -271,9 +271,9 @@ class TestRenderSummary:
         out = render_summary(alerts, 1, match_times=times)
         assert "2H 67'" in out
 
-    def test_shows_time_column_header(self) -> None:
+    def test_shows_clock_column_header(self) -> None:
         out = render_summary(self._make_alerts(), 0)
-        assert "Time" in out
+        assert "Clock" in out
 
 
 # ---------------------------------------------------------------------------

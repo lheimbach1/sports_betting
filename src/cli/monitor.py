@@ -235,44 +235,97 @@ def render_summary(
     match_times: dict[str, str] | None = None,
 ) -> str:
     """Render the live alert summary table."""
+    import shutil
+
+    term_w = shutil.get_terminal_size((100, 24)).columns
     now = datetime.now().strftime("%H:%M:%S")
     times = match_times or {}
+
     lines: list[str] = [
-        f"=== Odds Monitor === (updates: {update_count}, last: {now})",
+        f" Odds Monitor  |  updates: {update_count}  |  {now}",
         "",
     ]
 
-    # Column headers
+    # Adaptive column widths based on terminal width
+    # Minimum: #(3) + Event(20) + Clock(7) + Odds(5) + Dir(2) + Thr(5) + Status(9) = ~60
+    # With market/outcome we need more
+    ev_w = min(max(term_w - 70, 20), 36)
+    mk_w = min(max(term_w - 90, 12), 20)
+    oc_w = min(max(term_w - 100, 10), 16)
+
     hdr = (
-        f"  {'#':>3}  {'Event':<30} {'Time':<8}"
-        f" {'Market':<18} {'Outcome':<16}"
-        f" {'Odds':>5} {'Dir':>3} {'Thr':>6}   {'Status':<9}"
+        f" {'#':>2}"
+        f"  {'Event':<{ev_w}}"
+        f"  {'Clock':<7}"
+        f"  {'Market':<{mk_w}}"
+        f"  {'Outcome':<{oc_w}}"
+        f"  {'Odds':>5}"
+        f" {'':>2}"
+        f" {'Thr':>5}"
+        f"  {'Status':<9}"
     )
     lines.append(hdr)
-    lines.append("  " + "-" * (len(hdr) - 2))
+    lines.append(" " + "-" * (len(hdr) - 1))
 
     for i, a in enumerate(alerts, 1):
-        ev = a.event_label[:30] if len(a.event_label) > 30 else a.event_label
-        mt = times.get(a.event_id, "")[:8]
-        mk = a.market_name[:18] if len(a.market_name) > 18 else a.market_name
-        oc = a.outcome_name[:16] if len(a.outcome_name) > 16 else a.outcome_name
+        ev = (a.event_label[:ev_w - 2] + "..") if len(a.event_label) > ev_w else a.event_label
+        mt = times.get(a.event_id, "")[:7]
+        mk = (a.market_name[:mk_w - 2] + "..") if len(a.market_name) > mk_w else a.market_name
+        oc = (a.outcome_name[:oc_w - 2] + "..") if len(a.outcome_name) > oc_w else a.outcome_name
         odds_str = f"{a.current_odds:.2f}" if a.current_odds else "  -  "
+
+        status = a.status.value
+        if a.status == AlertStatus.TRIGGERED:
+            status = f"\033[1;31m{status}\033[0m"  # bold red
+        elif a.status == AlertStatus.COOLDOWN:
+            status = f"\033[33m{status}\033[0m"  # yellow
+
         lines.append(
-            f"  {i:>3}  {ev:<30} {mt:<8}"
-            f" {mk:<18} {oc:<16}"
-            f" {odds_str:>5} {a.direction.value:>3} {a.threshold:>6.2f}   {a.status.value:<9}"
+            f" {i:>2}"
+            f"  {ev:<{ev_w}}"
+            f"  {mt:<7}"
+            f"  {mk:<{mk_w}}"
+            f"  {oc:<{oc_w}}"
+            f"  {odds_str:>5}"
+            f" {a.direction.value:>2}"
+            f" {a.threshold:>5.2f}"
+            f"  {status}"
         )
 
     lines.append("")
-    lines.append("  Press Ctrl+C to stop.")
+    lines.append(" Ctrl+C to stop")
     return "\n".join(lines)
 
 
+_prev_line_count = 0
+
+
 def _redraw(text: str) -> None:
-    """Clear the terminal and redraw the given text."""
-    sys.stdout.write("\033[2J\033[H")
-    sys.stdout.write(text + "\n")
+    """Redraw the summary in-place without clearing the screen.
+
+    Moves the cursor up to overwrite previous output, then clears any
+    leftover lines from the previous frame.
+    """
+    global _prev_line_count  # noqa: PLW0603
+    lines = text.split("\n")
+
+    # Move cursor to the start of the previous output
+    if _prev_line_count > 0:
+        sys.stdout.write(f"\033[{_prev_line_count}A")
+
+    # Write each line, clearing to end of line to remove stale content
+    for line in lines:
+        sys.stdout.write(f"\r{line}\033[K\n")
+
+    # Clear any extra lines left from a previous longer frame
+    extra = _prev_line_count - len(lines)
+    for _ in range(extra):
+        sys.stdout.write("\033[K\n")
+    if extra > 0:
+        sys.stdout.write(f"\033[{extra}A")
+
     sys.stdout.flush()
+    _prev_line_count = len(lines)
 
 
 # ---------------------------------------------------------------------------
