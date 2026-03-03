@@ -180,6 +180,29 @@ def _redraw(text: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _filter_pick(
+    items: list[dict[str, str]],
+    key: str,
+    needle: str,
+    prompt_label: str,
+) -> dict[str, str] | None:
+    """Filter *items* by *needle* on *key* and let the user pick if ambiguous."""
+    filtered = [it for it in items if needle.lower() in it[key].lower()]
+    if len(filtered) == 1:
+        return filtered[0]
+    if filtered:
+        choice2 = prompt_choice(
+            [it[key] for it in filtered],
+            prompt=prompt_label,
+            allow_back=False,
+        )
+        if isinstance(choice2, int) and 0 <= choice2 < len(filtered):
+            return filtered[choice2]
+    else:
+        print(f'  No match for "{needle}".')
+    return None
+
+
 async def setup_alerts(page: Page) -> tuple[list[Alert], str, Sport] | None:
     """Interactive flow: pick sport -> category -> events -> markets -> thresholds.
 
@@ -192,36 +215,79 @@ async def setup_alerts(page: Page) -> tuple[list[Alert], str, Sport] | None:
         print("No sports found.")
         return None
 
-    choice = prompt_choice(
-        [s["name"] for s in sports],
-        prompt="Select sport",
-        allow_back=False,
-        extras=[s.get("count", "") for s in sports],
-        extras_header="Events",
-    )
-    if choice is None or isinstance(choice, str):
-        return None
-    selected_sport = sports[choice]
+    choice: int | str | None = None
+    selected_sport: dict[str, str] | None = None
+    while selected_sport is None:
+        choice = prompt_choice(
+            [s["name"] for s in sports],
+            prompt="Select sport",
+            allow_back=False,
+            extras=[s.get("count", "") for s in sports],
+            extras_header="Events",
+        )
+        if choice is None:
+            return None
+        if isinstance(choice, str):
+            selected_sport = _filter_pick(sports, "name", choice, "Select sport")
+            continue
+        selected_sport = sports[choice]
+
     sport_enum = _sport_from_url(selected_sport["url_part"])
 
-    # --- Category selection ---
+    # --- Category selection (with sub-category drill-down) ---
     print(f"\nLoading categories for {selected_sport['name']}...")
     categories = await discover_categories(page, selected_sport["url_part"])
     if not categories:
         print("No categories found.")
         return None
 
-    choice = prompt_choice(
-        [c["name"] for c in categories],
-        prompt="Select category",
-        allow_back=False,
-        extras=[c.get("count", "") for c in categories],
-        extras_header="Events",
-    )
-    if choice is None or isinstance(choice, str):
-        return None
-    selected_cat = categories[choice]
+    selected_cat: dict[str, str] | None = None
+    while selected_cat is None:
+        choice = prompt_choice(
+            [c["name"] for c in categories],
+            prompt="Select category",
+            allow_back=False,
+            extras=[c.get("count", "") for c in categories],
+            extras_header="Events",
+        )
+        if choice is None:
+            return None
+        if isinstance(choice, str):
+            selected_cat = _filter_pick(categories, "name", choice, "Select category")
+            continue
+        selected_cat = categories[choice]
+
+    # Check for sub-categories (e.g. International -> International Rest)
     category_url_part = selected_cat["url_part"]
+    print(f"\nChecking for sub-categories in {selected_cat['name']}...")
+    sub_cats = await discover_categories(page, category_url_part)
+    # Filter out the parent itself and anything at the same level
+    sub_cats = [sc for sc in sub_cats if sc["url_part"] != category_url_part]
+
+    if sub_cats:
+        print(f"  Found {len(sub_cats)} sub-category(ies).")
+        selected_sub: dict[str, str] | None = None
+        while selected_sub is None:
+            choice = prompt_choice(
+                [sc["name"] for sc in sub_cats],
+                prompt="Select sub-category (or 'q' to use parent)",
+                allow_back=False,
+                extras=[sc.get("count", "") for sc in sub_cats],
+                extras_header="Events",
+            )
+            if choice is None:
+                # Use the parent category
+                break
+            if isinstance(choice, str):
+                selected_sub = _filter_pick(
+                    sub_cats, "name", choice, "Select sub-category",
+                )
+                continue
+            selected_sub = sub_cats[choice]
+
+        if selected_sub is not None:
+            selected_cat = selected_sub
+            category_url_part = selected_sub["url_part"]
 
     print(f"\nAll alerts must be within: {selected_cat['name']}")
     print("  (one WebSocket connection per category)\n")
@@ -251,10 +317,31 @@ async def setup_alerts(page: Page) -> tuple[list[Alert], str, Sport] | None:
             prompt="Select event",
             allow_back=False,
         )
-        if ev_choice is None or isinstance(ev_choice, str):
+        if ev_choice is None:
             if alerts:
                 break  # proceed with existing alerts
             return None
+        if isinstance(ev_choice, str):
+            # Text filter on events
+            needle = ev_choice.lower()
+            filtered_events = [
+                (i, e) for i, e in enumerate(events)
+                if needle in e.home_team.lower() or needle in e.away_team.lower()
+            ]
+            if not filtered_events:
+                print(f'  No event matching "{ev_choice}".')
+                continue
+            if len(filtered_events) == 1:
+                ev_choice = filtered_events[0][0]
+            else:
+                choice2 = prompt_choice(
+                    [event_labels[i] for i, _ in filtered_events],
+                    prompt="Select event",
+                    allow_back=False,
+                )
+                if not isinstance(choice2, int):
+                    continue
+                ev_choice = filtered_events[choice2][0]
         selected_event = events[ev_choice]
         event_label = event_labels[ev_choice]
 
