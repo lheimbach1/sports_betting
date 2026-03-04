@@ -38,3 +38,4 @@ class Event(BaseModel):
     start_time: datetime
     markets: list[Market]
     provider: str
+    volume: float | None = None

@@ -98,6 +98,12 @@ def _parse_event(raw: dict[str, Any], league_name: str) -> Event | None:  # noqa
 
     event_id: str = raw.get("id", raw.get("slug", title))
 
+    volume: float | None = None
+    try:
+        volume = float(raw.get("volume", 0))
+    except (TypeError, ValueError):
+        pass
+
     return Event(
         id=str(event_id),
         sport=Sport.FOOTBALL,
@@ -107,6 +113,7 @@ def _parse_event(raw: dict[str, Any], league_name: str) -> Event | None:  # noqa
         start_time=kickoff,
         markets=[Market(name="1X2", outcomes=[home_outcome, draw_outcome, away_outcome])],
         provider="polymarket",
+        volume=volume,
     )
 
 
