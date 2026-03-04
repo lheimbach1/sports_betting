@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import timezone
 from difflib import SequenceMatcher
 
 from src.models.events import Event
@@ -254,11 +255,16 @@ def _team_similarity(a: str, b: str) -> float:
     """Compute similarity between two team names.
 
     Uses canonical alias lookup first (exact match = 1.0),
+    then checks if one name is a suffix of the other (handles US sports
+    where one provider uses "Red Wings" and another "Detroit Red Wings"),
     then falls back to fuzzy SequenceMatcher on normalized forms.
     """
     ca = canonicalize(a)
     cb = canonicalize(b)
     if ca == cb:
+        return 1.0
+    # Suffix match: "detroit red wings" ends with "red wings" → strong match.
+    if ca.endswith(cb) or cb.endswith(ca):
         return 1.0
     return SequenceMatcher(None, ca, cb).ratio()
 
@@ -266,6 +272,12 @@ def _team_similarity(a: str, b: str) -> float:
 # ---------------------------------------------------------------------------
 # Event matching
 # ---------------------------------------------------------------------------
+
+# Each individual team must reach this similarity to be considered a match.
+# Prevents "Mansfield" (0.47 vs "Man City") from matching just because the
+# other team ("Arsenal") is a perfect match.
+_MIN_TEAM_SIM = 0.5
+
 
 def match_events(
     events_a: list[Event],
@@ -284,12 +296,32 @@ def match_events(
     for i, ea in enumerate(events_a):
         for j, eb in enumerate(events_b):
             # Dates must be within ±1 day.
-            delta = abs((ea.start_time - eb.start_time).total_seconds())
+            # Normalise to UTC-aware to avoid naive/aware comparison errors.
+            t_a = ea.start_time if ea.start_time.tzinfo else ea.start_time.replace(tzinfo=timezone.utc)
+            t_b = eb.start_time if eb.start_time.tzinfo else eb.start_time.replace(tzinfo=timezone.utc)
+            delta = abs((t_a - t_b).total_seconds())
             if delta > 86400:
                 continue
-            home_sim = _team_similarity(ea.home_team, eb.home_team)
-            away_sim = _team_similarity(ea.away_team, eb.away_team)
-            score = (home_sim + away_sim) / 2.0
+            # Try both pairings (home/away may be swapped across providers).
+            # Require each team to exceed a per-team minimum to prevent
+            # one perfect match from compensating for a bad one (e.g.
+            # "Mansfield" ≠ "Man City" even though "Arsenal" = "Arsenal").
+            sim_hh = _team_similarity(ea.home_team, eb.home_team)
+            sim_aa = _team_similarity(ea.away_team, eb.away_team)
+            sim_ha = _team_similarity(ea.home_team, eb.away_team)
+            sim_ah = _team_similarity(ea.away_team, eb.home_team)
+
+            if min(sim_hh, sim_aa) >= _MIN_TEAM_SIM:
+                straight = (sim_hh + sim_aa) / 2.0
+            else:
+                straight = 0.0
+
+            if min(sim_ha, sim_ah) >= _MIN_TEAM_SIM:
+                crossed = (sim_ha + sim_ah) / 2.0
+            else:
+                crossed = 0.0
+
+            score = max(straight, crossed)
             if score >= 0.6:
                 candidates.append((score, i, j))
 
