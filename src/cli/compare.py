@@ -18,7 +18,7 @@ OVERLAPPING_LEAGUES = list(LEAGUE_TAGS.keys())
 
 @dataclass
 class ComparedMatch:
-    """A matched event with odds from both providers and computed diff."""
+    """A matched event enriched with best-of-both-providers odds and arbitrage margin."""
 
     home: str
     away: str
@@ -26,7 +26,9 @@ class ComparedMatch:
     kickoff: str
     sp_odds: tuple[float, float, float]  # (1, X, 2)
     pm_odds: tuple[float, float, float]
-    max_diff_pct: float  # largest |diff| / sporttip * 100
+    best_odds: tuple[float, float, float]  # best of SP/PM per outcome
+    arb_margin: float  # arbitrage profit margin (%), positive = profit
+    pm_volume: float  # Polymarket total USD volume
 
 
 def _find_1x2(event: Event) -> tuple[float, float, float] | None:
@@ -36,11 +38,24 @@ def _find_1x2(event: Event) -> tuple[float, float, float] | None:
             odds_map: dict[str, float] = {}
             for o in m.outcomes:
                 odds_map[o.name] = o.odds
+            # Try canonical "1"/"X"/"2" outcome names first.
             h = odds_map.get("1")
             d = odds_map.get("X")
             a = odds_map.get("2")
             if h and d and a:
                 return (h, d, a)
+            # Fall back to team-name outcomes (e.g. "Bournemouth", "Draw").
+            d = odds_map.get("Draw")
+            if d and len(m.outcomes) == 3:
+                home_lower = event.home_team.lower()
+                away_lower = event.away_team.lower()
+                for o in m.outcomes:
+                    if o.name.lower() == home_lower:
+                        h = o.odds
+                    elif o.name.lower() == away_lower:
+                        a = o.odds
+                if h and d and a:
+                    return (h, d, a)
     return None
 
 
@@ -57,8 +72,24 @@ async def fetch_all_odds(
     return sp_events, pm_events
 
 
+def compute_arb_margin(
+    sp_odds: tuple[float, float, float],
+    pm_odds: tuple[float, float, float],
+) -> tuple[tuple[float, float, float], float]:
+    """Compute the cross-provider arbitrage margin for a 1X2 market.
+
+    For each outcome, pick the higher odds between the two providers.
+    The arbitrage margin is: (1 / sum_of_implied_probs - 1) * 100.
+    Positive values indicate a guaranteed-profit arbitrage opportunity.
+    """
+    best = tuple(max(s, p) for s, p in zip(sp_odds, pm_odds))
+    implied_sum = sum(1.0 / o for o in best)
+    margin = (1.0 / implied_sum - 1.0) * 100.0
+    return (best[0], best[1], best[2]), round(margin, 2)
+
+
 def compute_diffs(matched: list[MatchedEvent]) -> list[ComparedMatch]:
-    """Compute per-outcome odds differences for matched events."""
+    """Compute arbitrage profit margins for matched events."""
     results: list[ComparedMatch] = []
     for m in matched:
         sp_1x2 = _find_1x2(m.sporttip)
@@ -66,13 +97,7 @@ def compute_diffs(matched: list[MatchedEvent]) -> list[ComparedMatch]:
         if sp_1x2 is None or pm_1x2 is None:
             continue
 
-        diffs: list[float] = []
-        for sp_o, pm_o in zip(sp_1x2, pm_1x2):
-            if sp_o > 0:
-                diffs.append(abs(sp_o - pm_o) / sp_o * 100)
-            else:
-                diffs.append(0.0)
-
+        best_odds, margin = compute_arb_margin(sp_1x2, pm_1x2)
         kickoff = m.sporttip.start_time.strftime("%a %H:%M")
 
         results.append(ComparedMatch(
@@ -82,10 +107,12 @@ def compute_diffs(matched: list[MatchedEvent]) -> list[ComparedMatch]:
             kickoff=kickoff,
             sp_odds=sp_1x2,
             pm_odds=pm_1x2,
-            max_diff_pct=round(max(diffs), 1),
+            best_odds=best_odds,
+            arb_margin=margin,
+            pm_volume=m.polymarket.volume or 0.0,
         ))
 
-    results.sort(key=lambda c: c.max_diff_pct, reverse=True)
+    results.sort(key=lambda c: c.arb_margin, reverse=True)
     return results
 
 
@@ -127,7 +154,11 @@ def format_comparison_table(
     col_pm1 = "PM 1"
     col_pmx = "X"
     col_pm2 = "2"
-    col_diff = "Diff%"
+    col_b1 = "Best1"
+    col_bx = "BestX"
+    col_b2 = "Best2"
+    col_arb = "Arb%"
+    col_vol = "PM Vol"
 
     # Compute column widths.
     match_names = [f"{c.home} vs {c.away}" for c in compared]
@@ -138,11 +169,20 @@ def format_comparison_table(
     def fmt_odds(v: float) -> str:
         return f"{v:.2f}"
 
+    def fmt_vol(v: float) -> str:
+        if v >= 1_000_000:
+            return f"${v / 1_000_000:.1f}M"
+        if v >= 1_000:
+            return f"${v / 1_000:.0f}K"
+        return f"${v:.0f}"
+
     hdr = (
         f" {col_match:<{w_match}}  {col_league:<{w_league}}  {col_kick:<{w_kick}}"
         f"  {col_sp1:>5} {col_spx:>5} {col_sp2:>5}"
         f"  {col_pm1:>5} {col_pmx:>5} {col_pm2:>5}"
-        f"  {col_diff:>6}"
+        f"  {col_b1:>5} {col_bx:>5} {col_b2:>5}"
+        f"  {col_arb:>7}"
+        f"  {col_vol:>8}"
     )
     lines.append(hdr)
     lines.append(" " + "─" * (len(hdr) - 1))
@@ -154,7 +194,10 @@ def format_comparison_table(
             f" {fmt_odds(c.sp_odds[2]):>5}"
             f"  {fmt_odds(c.pm_odds[0]):>5} {fmt_odds(c.pm_odds[1]):>5}"
             f" {fmt_odds(c.pm_odds[2]):>5}"
-            f"  {c.max_diff_pct:>5.1f}%"
+            f"  {fmt_odds(c.best_odds[0]):>5} {fmt_odds(c.best_odds[1]):>5}"
+            f" {fmt_odds(c.best_odds[2]):>5}"
+            f"  {c.arb_margin:>6.2f}%"
+            f"  {fmt_vol(c.pm_volume):>8}"
         )
         lines.append(row)
 
@@ -168,7 +211,7 @@ def format_comparison_table(
     return "\n".join(lines)
 
 
-async def _async_main(leagues: list[str], min_diff: float) -> None:
+async def _async_main(leagues: list[str], min_margin: float) -> None:
     """Async entry point."""
     print("Fetching odds from Sporttip and Polymarket…")
     sp_events, pm_events = await fetch_all_odds(leagues)
@@ -177,8 +220,8 @@ async def _async_main(leagues: list[str], min_diff: float) -> None:
     matched = match_events(sp_events, pm_events)
     compared = compute_diffs(matched)
 
-    if min_diff > 0:
-        compared = [c for c in compared if c.max_diff_pct >= min_diff]
+    if min_margin > -100:
+        compared = [c for c in compared if c.arb_margin >= min_margin]
 
     table = format_comparison_table(compared, len(sp_events), len(pm_events))
     print(table)
@@ -196,10 +239,10 @@ def cli() -> None:
         help="Filter to a single league (e.g. 'Premier League')",
     )
     parser.add_argument(
-        "--min-diff",
+        "--min-margin",
         type=float,
-        default=0.0,
-        help="Only show matches with diff%% >= this threshold",
+        default=-100.0,
+        help="Only show matches with arb margin >= this threshold (%%)",
     )
     args = parser.parse_args()
 
@@ -211,7 +254,7 @@ def cli() -> None:
             sys.exit(1)
         leagues = [args.league]
 
-    asyncio.run(_async_main(leagues, args.min_diff))
+    asyncio.run(_async_main(leagues, args.min_margin))
 
 
 if __name__ == "__main__":

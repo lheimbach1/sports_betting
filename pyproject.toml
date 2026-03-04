@@ -27,6 +27,9 @@ dev = [
     "mypy>=1.10",
 ]
 
+[tool.setuptools.packages.find]
+where = ["."]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
