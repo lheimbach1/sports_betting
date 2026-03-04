@@ -268,6 +268,13 @@ class TestMatchEvents:
         # The best match should be Arsenal-Everton, not Arsenal-Chelsea.
         assert result[0].sporttip.away_team == "Everton"
 
+    def test_rejects_partial_name_overlap(self) -> None:
+        """'Mansfield' must not match 'Man City' just because 'Arsenal' matches."""
+        sp = [_make_event("Mansfield", "Arsenal", DT, provider="sporttip")]
+        pm = [_make_event("Manchester City", "Arsenal FC", DT, provider="polymarket")]
+        result = match_events(sp, pm)
+        assert result == []
+
     def test_empty_lists(self) -> None:
         assert match_events([], []) == []
         sp = [_make_event("Arsenal", "Everton", DT)]

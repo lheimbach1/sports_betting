@@ -325,8 +325,8 @@ class TestLeagueUrlResolution:
         assert result == "/football/england/premier-league"
 
     def test_unknown_league_uses_slugified_fallback(self) -> None:
-        url = _resolve_league_url("Eredivisie", Sport.FOOTBALL)
-        assert url == "/football/eredivisie"
+        url = _resolve_league_url("K League 1", Sport.FOOTBALL)
+        assert url == "/football/k-league-1"
 
     def test_slugify_simple(self) -> None:
         assert _slugify_league("Premier League") == "premier-league"
@@ -341,9 +341,10 @@ class TestLeagueUrlResolution:
         for league in DEFAULT_LEAGUES:
             assert league in LEAGUE_URLS
 
-    def test_all_known_leagues_start_with_sport(self) -> None:
-        for url in LEAGUE_URLS.values():
-            assert url.startswith("/football/")
+    def test_all_known_leagues_start_with_sport_prefix(self) -> None:
+        valid_prefixes = ("/football/", "/basketball/", "/ice-hockey/", "/tennis/")
+        for league, url in LEAGUE_URLS.items():
+            assert url.startswith(valid_prefixes), f"{league}: {url}"
 
 
 class TestSporttipProvider:
