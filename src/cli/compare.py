@@ -295,6 +295,12 @@ def _format_section(
     def fmt_odds(v: float) -> str:
         return f"{v:.2f}"
 
+    def fmt_odds_stake(v: float, stake: float | None) -> str:
+        """Format odds with optional stake % when this is the best provider."""
+        if stake is not None:
+            return f"{v:.2f} {stake:.0f}%"
+        return f"{v:.2f}"
+
     def fmt_vol(v: float) -> str:
         if v >= 1_000_000:
             return f"${v / 1_000_000:.1f}M"
@@ -302,13 +308,11 @@ def _format_section(
             return f"${v / 1_000:.0f}K"
         return f"${v:.0f}"
 
-    def fmt_bet(pct: float, provider: str) -> str:
-        return f"{pct:.1f}%@{provider}"
-
     def fmt_or(v: float) -> str:
         return f"{v:.1f}%"
 
-    w_bet = max(5, len(fmt_bet(100.0, "PM")))
+    # Odds+stake cells are wider: "1.50 34%" = 8 chars
+    w_os = 8  # width for odds+stake columns
 
     lines.append(f"  [{sport_label}]")
     lines.append("")
@@ -316,21 +320,19 @@ def _format_section(
     if is_3way:
         hdr = (
             f" {col_match:<{w_match}}  {col_league:<{w_league}}  {col_kick:<{w_kick}}"
-            f"  {'ST 1':>5} {'X':>5} {'2':>5}"
-            f"  {'PM 1':>5} {'X':>5} {'2':>5}"
+            f"  {'ST 1':>{w_os}} {'X':>{w_os}} {'2':>{w_os}}"
+            f"  {'PM 1':>{w_os}} {'X':>{w_os}} {'2':>{w_os}}"
             f"  {'ST OR':>6} {'PM OR':>6}"
             f"  {col_arb:>7}"
-            f"  {'Bet 1':>{w_bet}} {'Bet X':>{w_bet}} {'Bet 2':>{w_bet}}"
             f"  {col_vol:>8}"
         )
     else:
         hdr = (
             f" {col_match:<{w_match}}  {col_league:<{w_league}}  {col_kick:<{w_kick}}"
-            f"  {'ST 1':>5} {'2':>5}"
-            f"  {'PM 1':>5} {'2':>5}"
+            f"  {'ST 1':>{w_os}} {'2':>{w_os}}"
+            f"  {'PM 1':>{w_os}} {'2':>{w_os}}"
             f"  {'ST OR':>6} {'PM OR':>6}"
             f"  {col_arb:>7}"
-            f"  {'Bet 1':>{w_bet}} {'Bet 2':>{w_bet}}"
             f"  {col_vol:>8}"
         )
 
@@ -338,31 +340,35 @@ def _format_section(
     lines.append(" " + "─" * (len(hdr) - 1))
 
     for c, name in zip(compared, match_names):
-        bets = [
-            fmt_bet(c.stakes[i], c.best_providers[i])
-            for i in range(len(c.outcome_names))
-        ]
+        # Build odds cells: append stake % to the best provider's cell.
+        sp_cells = []
+        pm_cells = []
+        for i in range(len(c.outcome_names)):
+            if c.best_providers[i] == "ST":
+                sp_cells.append(fmt_odds_stake(c.sp_odds[i], c.stakes[i]))
+                pm_cells.append(fmt_odds(c.pm_odds[i]))
+            else:
+                sp_cells.append(fmt_odds(c.sp_odds[i]))
+                pm_cells.append(fmt_odds_stake(c.pm_odds[i], c.stakes[i]))
 
         if is_3way:
             row = (
                 f" {name:<{w_match}}  {c.league:<{w_league}}  {c.kickoff:<{w_kick}}"
-                f"  {fmt_odds(c.sp_odds[0]):>5} {fmt_odds(c.sp_odds[1]):>5}"
-                f" {fmt_odds(c.sp_odds[2]):>5}"
-                f"  {fmt_odds(c.pm_odds[0]):>5} {fmt_odds(c.pm_odds[1]):>5}"
-                f" {fmt_odds(c.pm_odds[2]):>5}"
+                f"  {sp_cells[0]:>{w_os}} {sp_cells[1]:>{w_os}}"
+                f" {sp_cells[2]:>{w_os}}"
+                f"  {pm_cells[0]:>{w_os}} {pm_cells[1]:>{w_os}}"
+                f" {pm_cells[2]:>{w_os}}"
                 f"  {fmt_or(c.sp_overround):>6} {fmt_or(c.pm_overround):>6}"
                 f"  {c.arb_margin:>6.2f}%"
-                f"  {bets[0]:>{w_bet}} {bets[1]:>{w_bet}} {bets[2]:>{w_bet}}"
                 f"  {fmt_vol(c.pm_volume):>8}"
             )
         else:
             row = (
                 f" {name:<{w_match}}  {c.league:<{w_league}}  {c.kickoff:<{w_kick}}"
-                f"  {fmt_odds(c.sp_odds[0]):>5} {fmt_odds(c.sp_odds[1]):>5}"
-                f"  {fmt_odds(c.pm_odds[0]):>5} {fmt_odds(c.pm_odds[1]):>5}"
+                f"  {sp_cells[0]:>{w_os}} {sp_cells[1]:>{w_os}}"
+                f"  {pm_cells[0]:>{w_os}} {pm_cells[1]:>{w_os}}"
                 f"  {fmt_or(c.sp_overround):>6} {fmt_or(c.pm_overround):>6}"
                 f"  {c.arb_margin:>6.2f}%"
-                f"  {bets[0]:>{w_bet}} {bets[1]:>{w_bet}}"
                 f"  {fmt_vol(c.pm_volume):>8}"
             )
         lines.append(row)

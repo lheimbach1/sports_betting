@@ -322,11 +322,9 @@ class TestFormatComparisonTable:
         assert "1.50" in table
         assert "-2.50%" in table
         assert "Arb%" in table
-        assert "Bet 1" in table
-        assert "Bet X" in table
-        assert "Bet 2" in table
-        assert "@ST" in table
-        assert "@PM" in table
+        # Stake % is embedded in odds cells (e.g. "1.50 63%"), no separate Bet columns
+        assert "62%" in table  # stake for outcome 1 (best at ST)
+        assert "Bet 1" not in table
         assert "ST OR" in table
         assert "PM OR" in table
         assert "5.0%" in table
@@ -387,10 +385,10 @@ class TestFormatComparisonTable:
         table = format_comparison_table(compared, 5, 5)
         assert "Lakers vs Celtics" in table
         assert "Basketball" in table
-        assert "Bet 1" in table
-        assert "Bet 2" in table
-        # Should NOT have Bet X column
-        assert "Bet X" not in table
+        # Stake % is embedded in odds cells, no separate Bet columns
+        assert "56%" in table  # stake for outcome 1 (best at ST)
+        assert "44%" in table  # stake for outcome 2 (best at PM)
+        assert "Bet 1" not in table
 
     def test_multi_sport_sections(self) -> None:
         """Multiple sports should produce separate sections."""
