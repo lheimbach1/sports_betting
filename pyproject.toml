@@ -17,6 +17,7 @@ dependencies = [
 sporttip-explore = "src.cli.explore:cli"
 sporttip-monitor = "src.cli.monitor:cli"
 sporttip-compare = "src.cli.compare:cli"
+sporttip-scan = "src.cli.scanner:cli"
 
 [project.optional-dependencies]
 dev = [
