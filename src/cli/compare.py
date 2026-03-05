@@ -273,6 +273,11 @@ def compute_diffs(matched: list[MatchedEvent]) -> list[ComparedMatch]:
     return results
 
 
+def _is_cross_provider(cm: ComparedMatch) -> bool:
+    """Return True if the best odds span at least two different providers."""
+    return len(set(cm.best_providers)) > 1
+
+
 def _format_section(
     compared: list[ComparedMatch],
     sport_label: str,
@@ -408,20 +413,43 @@ def format_comparison_table(
             )
         return "\n".join(lines)
 
-    # Group by sport for separate sections.
-    sports_seen: list[Sport] = []
-    by_sport: dict[Sport, list[ComparedMatch]] = {}
-    for c in compared:
-        if c.sport not in by_sport:
-            sports_seen.append(c.sport)
-            by_sport[c.sport] = []
-        by_sport[c.sport].append(c)
+    # Split into cross-provider (real arb candidates) and single-provider.
+    cross = [c for c in compared if _is_cross_provider(c)]
+    single = [c for c in compared if not _is_cross_provider(c)]
 
-    for sport in sports_seen:
-        label = _SPORT_LABELS.get(sport, sport.value.replace("_", " ").title())
-        section = _format_section(by_sport[sport], label)
-        lines.extend(section)
-        lines.append("")
+    # Group cross-provider by sport for separate sections.
+    if cross:
+        sports_seen: list[Sport] = []
+        by_sport: dict[Sport, list[ComparedMatch]] = {}
+        for c in cross:
+            if c.sport not in by_sport:
+                sports_seen.append(c.sport)
+                by_sport[c.sport] = []
+            by_sport[c.sport].append(c)
+
+        for sport in sports_seen:
+            label = _SPORT_LABELS.get(sport, sport.value.replace("_", " ").title())
+            section = _format_section(by_sport[sport], label)
+            lines.extend(section)
+            lines.append("")
+
+    # Single-provider matches in a separate section.
+    if single:
+        if cross:
+            lines.append("")
+        sports_seen_s: list[Sport] = []
+        by_sport_s: dict[Sport, list[ComparedMatch]] = {}
+        for c in single:
+            if c.sport not in by_sport_s:
+                sports_seen_s.append(c.sport)
+                by_sport_s[c.sport] = []
+            by_sport_s[c.sport].append(c)
+
+        for sport in sports_seen_s:
+            label = _SPORT_LABELS.get(sport, sport.value.replace("_", " ").title())
+            section = _format_section(by_sport_s[sport], f"{label} — Single Provider")
+            lines.extend(section)
+            lines.append("")
 
     n_unmatched_sp = n_sp - n_matched
     n_unmatched_pm = n_pm - n_matched

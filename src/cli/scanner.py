@@ -14,7 +14,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-from src.cli.compare import ComparedMatch, _format_section, compute_diffs, fetch_all_odds
+from src.cli.compare import (
+    ComparedMatch,
+    _format_section,
+    _is_cross_provider,
+    compute_diffs,
+    fetch_all_odds,
+)
 from src.cli.monitor import send_notification
 from src.matching import match_events
 from src.models.events import Sport
@@ -140,8 +146,15 @@ def render_dashboard(
     lines.append("")
 
     if compared:
-        table_lines = _format_section(compared, "All Matches")
-        lines.extend(table_lines)
+        cross = [c for c in compared if _is_cross_provider(c)]
+        single = [c for c in compared if not _is_cross_provider(c)]
+
+        if cross:
+            lines.extend(_format_section(cross, "Cross-Provider"))
+        if single:
+            if cross:
+                lines.append("")
+            lines.extend(_format_section(single, "Single Provider"))
     else:
         lines.append(" No matched events found.")
 
