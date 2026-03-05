@@ -215,6 +215,15 @@ class TestComputeArbMargin:
         assert stakes[0] > stakes[1]
         assert stakes[0] > stakes[2]
 
+    def test_single_provider_positive_margin_capped_to_zero(self) -> None:
+        """When all best odds come from one provider, positive margin is capped to 0."""
+        # PM has better odds on all outcomes → not a real cross-provider arb.
+        sp = (1.47, 4.40, 5.20)
+        pm = (1.59, 5.00, 5.88)
+        _, providers, _, margin = compute_arb_margin(sp, pm)
+        assert providers == ("PM", "PM", "PM")
+        assert margin == 0.0
+
     def test_2way_identical_odds(self) -> None:
         """2-way market with identical odds should produce negative margin."""
         best, providers, stakes, margin = compute_arb_margin((1.80, 2.10), (1.80, 2.10))

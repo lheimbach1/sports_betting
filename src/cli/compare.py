@@ -195,6 +195,10 @@ def compute_arb_margin(
     providers = tuple("ST" if s >= p else "PM" for s, p in zip(sp_odds, pm_odds))
     implied_sum = sum(1.0 / o for o in best)
     margin = (1.0 / implied_sum - 1.0) * 100.0
+    # A positive margin from a single provider isn't a real cross-provider arb —
+    # it just means that provider's overround is negative. Cap at 0.
+    if len(set(providers)) < 2 and margin > 0:
+        margin = 0.0
     stakes = tuple(round((1.0 / o) / implied_sum * 100.0, 1) for o in best)
     return best, providers, stakes, round(margin, 2)
 

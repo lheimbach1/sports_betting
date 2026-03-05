@@ -154,11 +154,6 @@ def render_dashboard(
 # Main scan loop
 # ---------------------------------------------------------------------------
 
-def _is_cross_provider(cm: ComparedMatch) -> bool:
-    """Return True if the arb requires bets on at least two different providers."""
-    return len(set(cm.best_providers)) > 1
-
-
 def _match_key(cm: ComparedMatch) -> str:
     return f"{cm.home} vs {cm.away}"
 
@@ -177,16 +172,14 @@ def _update_arbs(
     for cm in compared:
         key = _match_key(cm)
         current_keys.add(key)
-        # Single-provider "arbs" aren't real — treat margin as 0 for tracking.
-        effective_margin = cm.arb_margin if _is_cross_provider(cm) else 0.0
-        current_margins[key] = effective_margin
+        current_margins[key] = cm.arb_margin
 
-        if should_notify(active, key, effective_margin, min_margin, now):
+        if should_notify(active, key, cm.arb_margin, min_margin, now):
             notified.append(cm)
             opp = ArbOpportunity(
                 match_key=key,
                 league=cm.league,
-                margin=effective_margin,
+                margin=cm.arb_margin,
                 sp_odds=cm.sp_odds,
                 pm_odds=cm.pm_odds,
                 best_odds=cm.best_odds,
@@ -196,15 +189,15 @@ def _update_arbs(
                 last_notified=now,
             )
             active[key] = opp
-        elif effective_margin > min_margin and key in active:
+        elif cm.arb_margin > min_margin and key in active:
             # Update odds/margin without re-notifying
-            active[key].margin = effective_margin
+            active[key].margin = cm.arb_margin
             active[key].sp_odds = cm.sp_odds
             active[key].pm_odds = cm.pm_odds
             active[key].best_odds = cm.best_odds
             active[key].best_providers = cm.best_providers
             active[key].stakes = cm.stakes
-        elif effective_margin > min_margin and key not in active:
+        elif cm.arb_margin > min_margin and key not in active:
             # New arb that was already notified in this batch via should_notify
             pass
 

@@ -1,13 +1,7 @@
 """Tests for the continuous arbitrage scanner."""
 
 from src.cli.compare import ComparedMatch
-from src.cli.scanner import (
-    ArbOpportunity,
-    _is_cross_provider,
-    _update_arbs,
-    find_expired,
-    should_notify,
-)
+from src.cli.scanner import ArbOpportunity, _update_arbs, find_expired, should_notify
 from src.models.events import Sport
 
 # ---------------------------------------------------------------------------
@@ -204,46 +198,21 @@ class TestUpdateArbs:
         assert "Como vs Inter" in active
 
     def test_single_provider_arb_ignored(self) -> None:
-        """An arb where all best odds come from one provider should not be tracked."""
+        """An arb where all best odds come from one provider gets margin=0 from
+        compute_arb_margin, so it is never tracked by the scanner."""
         active: dict[str, ArbOpportunity] = {}
-        cm = _make_compared(margin=5.0)
-        # Override best_providers to all-ST (single provider)
+        # Single-provider: PM better on all outcomes → margin capped to 0.
         cm = ComparedMatch(
-            home=cm.home, away=cm.away, league=cm.league, kickoff=cm.kickoff,
-            sport=cm.sport, outcome_names=cm.outcome_names,
-            sp_odds=cm.sp_odds, pm_odds=cm.pm_odds,
-            best_odds=cm.best_odds,
-            best_providers=("ST", "ST", "ST"),
-            stakes=cm.stakes, arb_margin=5.0,
-            sp_overround=cm.sp_overround, pm_overround=cm.pm_overround,
-            pm_volume=cm.pm_volume,
+            home="Arsenal", away="Everton", league="Premier League",
+            kickoff="Sat 15:30", sport=Sport.FOOTBALL,
+            outcome_names=("1", "X", "2"),
+            sp_odds=(1.47, 4.40, 5.20), pm_odds=(1.59, 5.00, 5.88),
+            best_odds=(1.59, 5.00, 5.88),
+            best_providers=("PM", "PM", "PM"),
+            stakes=(62.5, 22.0, 15.5), arb_margin=0.0,  # capped by compute_arb_margin
+            sp_overround=5.0, pm_overround=-0.1,
+            pm_volume=100000.0,
         )
         notified = _update_arbs([cm], active, 0.0, 1000.0)
         assert len(notified) == 0
         assert "Arsenal vs Everton" not in active
-
-
-# ---------------------------------------------------------------------------
-# _is_cross_provider
-# ---------------------------------------------------------------------------
-
-class TestIsCrossProvider:
-    """Tests for cross-provider detection."""
-
-    def test_cross_provider_returns_true(self) -> None:
-        cm = _make_compared()  # default best_providers=("ST", "PM", "PM")
-        assert _is_cross_provider(cm) is True
-
-    def test_single_provider_returns_false(self) -> None:
-        cm = _make_compared()
-        cm = ComparedMatch(
-            home=cm.home, away=cm.away, league=cm.league, kickoff=cm.kickoff,
-            sport=cm.sport, outcome_names=cm.outcome_names,
-            sp_odds=cm.sp_odds, pm_odds=cm.pm_odds,
-            best_odds=cm.best_odds,
-            best_providers=("PM", "PM", "PM"),
-            stakes=cm.stakes, arb_margin=cm.arb_margin,
-            sp_overround=cm.sp_overround, pm_overround=cm.pm_overround,
-            pm_volume=cm.pm_volume,
-        )
-        assert _is_cross_provider(cm) is False
