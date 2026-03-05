@@ -72,6 +72,7 @@ LIVE_BASE = "https://www.swisslos.ch/en/sporttip/live"
 
 # Known league URL paths (sport/country/league segments)
 LEAGUE_URLS: dict[str, str] = {
+    # Football – top leagues
     "Bundesliga": "/football/germany/bundesliga",
     "2. Bundesliga": "/football/germany/2-bundesliga",
     "Super League": "/football/switzerland/super-league",
@@ -79,6 +80,23 @@ LEAGUE_URLS: dict[str, str] = {
     "LaLiga": "/football/spain/laliga",
     "Serie A": "/football/italy/serie-a",
     "Ligue 1": "/football/france/ligue-1",
+    # Football – European cups
+    "Champions League": "/football/international/champions-league",
+    "Europa League": "/football/international/europa-league",
+    "Conference League": "/football/international/conference-league",
+    # Football – other major leagues
+    "MLS": "/football/usa/mls",
+    "EFL Championship": "/football/england/championship",
+    "Eredivisie": "/football/netherlands/eredivisie",
+    "Primeira Liga": "/football/portugal/primeira-liga",
+    "Scottish Premiership": "/football/scotland/premiership",
+    # Basketball
+    "NBA": "/basketball/usa/nba",
+    # Ice Hockey
+    "NHL": "/ice-hockey/usa/nhl",
+    # Tennis
+    "ATP Singles": "/tennis/atp/atp-singles",
+    "WTA Singles": "/tennis/wta/wta-singles",
 }
 DEFAULT_LEAGUES: list[str] = ["Bundesliga", "2. Bundesliga"]
 
@@ -89,6 +107,9 @@ _1X2_MARKET_NAMES = {
 
 # Max parallel browser tabs for loading event detail pages
 _DETAIL_CONCURRENCY = 3
+
+# Max parallel browser tabs when discovering and fetching all leagues
+_LEAGUE_DISCOVER_CONCURRENCY = 5
 
 # CSS selector for event detail links on league pages
 _EVENT_LINK_SELECTOR = "a.mini-scoreboard-tap-area"
@@ -287,8 +308,8 @@ class SporttipProvider(BaseProvider):
         Args:
             sport: The sport to fetch events for.
             leagues: Optional list of league names to filter by.
-                     Defaults to DEFAULT_LEAGUES. Pass an empty list to fetch
-                     the sport landing page (all highlighted events).
+                     Defaults to DEFAULT_LEAGUES. Pass an empty list to
+                     discover all available leagues and fetch each one.
             all_markets: If True (default), visit each event's detail page
                          to load all available markets. If False, only load
                          the primary market (1X2) from the league page.
@@ -298,13 +319,7 @@ class SporttipProvider(BaseProvider):
             leagues = DEFAULT_LEAGUES
 
         if not leagues:
-            url_part = SPORT_URL_PARTS.get(sport)
-            if url_part is None:
-                logger.warning("No URL configured for sport %s", sport)
-                return []
-            snapshot = Snapshot()
-            await _connect_and_collect(snapshot, url_part)
-            return snapshot.build_events(sport)
+            return await self._fetch_all_leagues(sport, on_progress)
 
         all_events: list[Event] = []
         seen_urns: set[str] = set()
@@ -322,6 +337,162 @@ class SporttipProvider(BaseProvider):
                 if event.id not in seen_urns:
                     seen_urns.add(event.id)
                     all_events.append(event)
+        return all_events
+
+    async def _fetch_all_leagues(
+        self,
+        sport: Sport,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[Event]:
+        """Discover all league URLs from the sport page and fetch each one.
+
+        Opens the sport overview page, extracts league-level links from the
+        DOM, then visits each league page in parallel (up to
+        ``_LEAGUE_DISCOVER_CONCURRENCY`` tabs) to collect all events.
+        """
+        sport_url = SPORT_URL_PARTS.get(sport)
+        if sport_url is None:
+            logger.warning("No URL configured for sport %s", sport)
+            return []
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                locale="en-CH", timezone_id="Europe/Zurich",
+            )
+
+            # Phase 1: Load sport overview page and discover league URLs.
+            page = await context.new_page()
+            snapshot = Snapshot()
+            received = asyncio.Event()
+
+            def on_ws(ws: Any) -> None:
+                def on_received(payload: Any) -> None:
+                    if isinstance(payload, bytes):
+                        _process_ws_message(payload, snapshot)
+                        if snapshot.events and snapshot.selections:
+                            received.set()
+                ws.on("framereceived", on_received)
+
+            page.on("websocket", on_ws)
+            await page.goto(
+                f"{SITE_BASE}{sport_url}",
+                wait_until="networkidle",
+                timeout=45_000,
+            )
+            try:
+                await asyncio.wait_for(received.wait(), timeout=20.0)
+            except asyncio.TimeoutError:
+                pass
+            await page.wait_for_timeout(2000)
+
+            # Extract country/region links from the DOM.
+            # The sport overview page shows country links like
+            # /football/england (89 events), /football/germany (49), etc.
+            # as well as competition links like /football/champions-league.
+            sport_prefix = f"/sporttip/sports{sport_url}/"
+            link_elements = await page.query_selector_all(
+                f"a[href*='{sport_prefix}']",
+            )
+            league_urls: list[str] = []
+            seen_urls: set[str] = set()
+            for el in link_elements:
+                href = await el.get_attribute("href")
+                if not href:
+                    continue
+                idx = href.find("/sports")
+                if idx < 0:
+                    continue
+                path = href[idx + len("/sports"):]
+                # Strip query parameters.
+                if "?" in path:
+                    path = path.split("?")[0]
+                parts = path.strip("/").split("/")
+                # Accept 2-segment (country) or 3-segment (league) paths,
+                # but skip 4+ segments (individual event links).
+                if len(parts) in (2, 3):
+                    url = "/" + "/".join(parts)
+                    if url not in seen_urls:
+                        seen_urls.add(url)
+                        league_urls.append(url)
+
+            await page.close()
+
+            initial_events = snapshot.build_events(sport)
+            all_events: list[Event] = list(initial_events)
+            seen_urns: set[str] = {e.id for e in all_events}
+
+            logger.info(
+                "Sport page: %d events, %d league URLs discovered",
+                len(initial_events),
+                len(league_urls),
+            )
+
+            if not league_urls:
+                await browser.close()
+                return all_events
+
+            # Phase 2: Fetch each discovered league in parallel tabs.
+            sem = asyncio.Semaphore(_LEAGUE_DISCOVER_CONCURRENCY)
+            progress_count = 0
+            progress_lock = asyncio.Lock()
+
+            async def fetch_league(url_path: str) -> list[Event]:
+                nonlocal progress_count
+                async with sem:
+                    league_snap = Snapshot()
+                    league_received = asyncio.Event()
+                    league_page = await context.new_page()
+
+                    def on_league_ws(ws: Any) -> None:
+                        def on_league_received(payload: Any) -> None:
+                            if isinstance(payload, bytes):
+                                _process_ws_message(payload, league_snap)
+                                if league_snap.events and league_snap.selections:
+                                    league_received.set()
+                        ws.on("framereceived", on_league_received)
+
+                    league_page.on("websocket", on_league_ws)
+                    try:
+                        await league_page.goto(
+                            f"{SITE_BASE}{url_path}",
+                            wait_until="domcontentloaded",
+                            timeout=45_000,
+                        )
+                        await asyncio.wait_for(
+                            league_received.wait(), timeout=20.0,
+                        )
+                        await league_page.wait_for_timeout(2000)
+                    except (asyncio.TimeoutError, Exception) as exc:
+                        logger.warning("Failed to load %s: %s", url_path, exc)
+                    finally:
+                        async with progress_lock:
+                            progress_count += 1
+                            if on_progress:
+                                on_progress(progress_count, len(league_urls))
+
+                    await league_page.close()
+                    return league_snap.build_events(sport)
+
+            tasks = [fetch_league(url) for url in league_urls]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for result in results:
+                if not isinstance(result, list):
+                    continue
+                for event in result:
+                    if event.id not in seen_urns:
+                        seen_urns.add(event.id)
+                        all_events.append(event)
+
+            await browser.close()
+
+        logger.info(
+            "Total: %d %s events from %d leagues",
+            len(all_events),
+            sport.value,
+            len(league_urls),
+        )
         return all_events
 
     async def stream_updates(

@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
@@ -38,3 +41,72 @@ class Event(BaseModel):
     start_time: datetime
     markets: list[Market]
     provider: str
+    volume: float | None = None
+
+
+# ---------------------------------------------------------------------------
+# Multi-book / Kelly data models
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BookmakerOdds:
+    """A single bookmaker's odds for one outcome."""
+
+    bookmaker: str
+    odds: float
+
+
+@dataclass
+class MultiBookMarket:
+    """Aggregated multi-bookmaker odds for one market."""
+
+    event_id: str
+    sport: Sport
+    league: str
+    home_team: str
+    away_team: str
+    start_time: datetime
+    outcome_names: tuple[str, ...]
+    odds_by_outcome: dict[str, list[BookmakerOdds]]
+
+
+@dataclass
+class FairValue:
+    """Consensus fair probabilities derived from multi-book odds."""
+
+    outcome_names: tuple[str, ...]
+    fair_probs: tuple[float, ...]
+    sharp_odds: tuple[float, ...]
+
+
+@dataclass
+class KellyRecommendation:
+    """Per-outcome Kelly recommendation."""
+
+    outcome_name: str
+    provider: str
+    offered_odds: float
+    fair_prob: float
+    edge: float
+    full_kelly_fraction: float
+    fractional_kelly: float
+    expected_value: float
+
+
+@dataclass
+class KellyAnalysis:
+    """Full Kelly analysis for one event."""
+
+    home: str
+    away: str
+    league: str
+    kickoff: str
+    fair_value: FairValue
+    recommendations: list[KellyRecommendation]
+    bankroll: float
+    total_stake_pct: float = 0.0
+    source: str = ""
+    n_bookmakers: int | None = None
+    multi_book: MultiBookMarket | None = None
+    sp_odds_by_outcome: dict[str, float] | None = None

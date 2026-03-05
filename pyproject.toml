@@ -16,6 +16,9 @@ dependencies = [
 [project.scripts]
 sporttip-explore = "src.cli.explore:cli"
 sporttip-monitor = "src.cli.monitor:cli"
+sporttip-compare = "src.cli.compare:cli"
+sporttip-scan = "src.cli.scanner:cli"
+sporttip-kelly = "src.cli.kelly:cli"
 
 [project.optional-dependencies]
 dev = [
@@ -25,6 +28,9 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
